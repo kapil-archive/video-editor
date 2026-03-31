@@ -1,298 +1,482 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 
-const VideoEditorPage = () => {
-  const videoRef = useRef(null);
-  const fileInputRef = useRef(null);
+const DEFAULT_IMAGE_DURATION = 3;
+const MIN_CLIP_DURATION = 0.2;
+const TRANSITIONS = {
+  cut: { name: 'Cut', duration: 0 },
+  fade: { name: 'Fade', duration: 0.5 },
+  dissolve: { name: 'Dissolve', duration: 0.8 },
+};
+
+const createDefaultEffects = () => ({
+  brightness: 0,
+  contrast: 100,
+  saturation: 100,
+  speed: 1,
+  blur: 0,
+  grayscale: 0,
+  fadeIn: 0,
+  fadeOut: 0,
+});
+
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const formatTime = (seconds) => {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return '0:00.0';
+  }
+
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds - mins * 60;
+  return `${mins}:${secs.toFixed(1).padStart(4, '0')}`;
+};
+
+const getBaseClipDuration = (clip) => {
+  if (!clip) {
+    return 0;
+  }
+
+  if (clip.type === 'image') {
+    return Math.max(MIN_CLIP_DURATION, clip.duration ?? DEFAULT_IMAGE_DURATION);
+  }
+
+  return Math.max(MIN_CLIP_DURATION, (clip.trimEnd ?? 0) - (clip.trimStart ?? 0));
+};
+
+const getRenderedClipDuration = (clip) => {
+  if (!clip) {
+    return 0;
+  }
+
+  if (clip.type === 'image') {
+    return Math.max(MIN_CLIP_DURATION, clip.duration ?? DEFAULT_IMAGE_DURATION);
+  }
+
+  const speed = Math.max(0.25, clip.effects?.speed ?? 1);
+  return Math.max(MIN_CLIP_DURATION, getBaseClipDuration(clip) / speed);
+};
+
+const getFileExtension = (file) => {
+  const fromName = file?.name?.split('.').pop()?.toLowerCase();
+  if (fromName) {
+    return fromName;
+  }
+
+  if (file?.type?.includes('png')) return 'png';
+  if (file?.type?.includes('jpeg') || file?.type?.includes('jpg')) return 'jpg';
+  if (file?.type?.includes('webp')) return 'webp';
+  if (file?.type?.includes('gif')) return 'gif';
+  if (file?.type?.includes('quicktime')) return 'mov';
+  if (file?.type?.includes('webm')) return 'webm';
+  return 'mp4';
+};
+
+const buildVideoFilter = (clip, outputDuration) => {
+  const effects = clip.effects;
+  const filters = [
+    'scale=1280:720:force_original_aspect_ratio=decrease',
+    'pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black',
+    `eq=brightness=${(effects.brightness / 100).toFixed(2)}:contrast=${Math.max(
+      0,
+      effects.contrast / 100
+    ).toFixed(2)}:saturation=${Math.max(0, effects.saturation / 100).toFixed(2)}`,
+  ];
+
+  if (effects.blur > 0) {
+    filters.push(`boxblur=${effects.blur}`);
+  }
+
+  if (effects.grayscale > 0) {
+    filters.push('hue=s=0');
+  }
+
+  if (clip.type === 'video' && effects.speed !== 1) {
+    filters.push(`setpts=${(1 / effects.speed).toFixed(4)}*PTS`);
+  }
+
+  if (effects.fadeIn > 0) {
+    filters.push(`fade=t=in:st=0:d=${Math.min(effects.fadeIn, outputDuration).toFixed(2)}`);
+  }
+
+  if (effects.fadeOut > 0 && outputDuration > effects.fadeOut) {
+    filters.push(
+      `fade=t=out:st=${Math.max(0, outputDuration - effects.fadeOut).toFixed(2)}:d=${effects.fadeOut.toFixed(2)}`
+    );
+  }
+
+  filters.push('fps=30');
+  return filters.join(',');
+};
+
+function VideoEditorPage() {
+  const previewVideoRef = useRef(null);
   const mergedVideoRef = useRef(null);
+  const fileInputRef = useRef(null);
   const ffmpegRef = useRef(null);
 
-  // State management
   const [clips, setClips] = useState([]);
   const [selectedClipIndex, setSelectedClipIndex] = useState(null);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [previewTime, setPreviewTime] = useState(0);
+  const [previewDuration, setPreviewDuration] = useState(0);
   const [exportProgress, setExportProgress] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
   const [ffmpegReady, setFfmpegReady] = useState(false);
-  const [exportStatus, setExportStatus] = useState('');
+  const [exportStatus, setExportStatus] = useState('Loading video engine...');
   const [mergedVideoUrl, setMergedVideoUrl] = useState(null);
 
-  // Transition presets
-  const TRANSITIONS = {
-    cut: { name: 'Cut', duration: 0 },
-    fade: { name: 'Fade', duration: 0.5 },
-    dissolve: { name: 'Dissolve', duration: 0.8 },
-  };
+  const selectedClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
 
-  // Initialize FFmpeg
+  const timelineData = useMemo(() => {
+    let cursor = 0;
+    return clips.map((clip) => {
+      const renderedDuration = getRenderedClipDuration(clip);
+      const item = {
+        start: cursor,
+        end: cursor + renderedDuration,
+        renderedDuration,
+      };
+      cursor += renderedDuration;
+      return item;
+    });
+  }, [clips]);
+
+  const totalDuration = timelineData.at(-1)?.end ?? 0;
+
   useEffect(() => {
     const initFFmpeg = async () => {
       try {
-        const ffmpeg = new FFmpeg({ log: true });
+        const ffmpeg = new FFmpeg();
         ffmpegRef.current = ffmpeg;
 
-        ffmpeg.onload = () => {
-          console.log('FFmpeg loaded successfully');
-          setFfmpegReady(true);
-          setExportStatus('FFmpeg ready');
-        };
+        ffmpeg.on('progress', (event) => {
+          const progress = typeof event.progress === 'number' ? event.progress : event.ratio ?? 0;
+          setExportProgress(Math.round(progress * 100));
+        });
 
-        ffmpeg.onprogress = ({ ratio }) => {
-          setExportProgress(Math.round(ratio * 100));
-        };
+        ffmpeg.on('log', (event) => {
+          if (event.message?.includes('time=')) {
+            setExportStatus(`Processing... ${event.message}`);
+          }
+        });
 
-        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
         const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript');
         const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm');
 
-        await ffmpeg.load({
-          coreURL,
-          wasmURL,
-        });
-
+        await ffmpeg.load({ coreURL, wasmURL });
         setFfmpegReady(true);
-        setExportStatus('FFmpeg initialized successfully');
-      } catch (err) {
-        console.error('FFmpeg initialization failed:', err);
-        setExportStatus('FFmpeg initialization failed - export unavailable');
+        setExportStatus('Video engine ready');
+      } catch (error) {
+        console.error('FFmpeg initialization failed:', error);
         setFfmpegReady(false);
+        setExportStatus('Video engine failed to load');
       }
     };
 
     initFFmpeg();
+
+    return () => {
+      if (ffmpegRef.current) {
+        ffmpegRef.current.terminate();
+      }
+    };
   }, []);
 
-  // Handle file upload
+  useEffect(() => {
+    if (!previewVideoRef.current || !selectedClip || selectedClip.type !== 'video') {
+      return undefined;
+    }
+
+    const videoElement = previewVideoRef.current;
+    videoElement.src = selectedClip.url;
+    videoElement.playbackRate = selectedClip.effects.speed;
+    videoElement.style.filter = `brightness(${1 + selectedClip.effects.brightness / 100}) contrast(${selectedClip.effects.contrast / 100}) saturate(${selectedClip.effects.saturation / 100}) blur(${selectedClip.effects.blur}px) grayscale(${selectedClip.effects.grayscale / 100})`;
+
+    const handleLoadedMetadata = () => {
+      videoElement.currentTime = selectedClip.trimStart;
+      setPreviewDuration(videoElement.duration);
+    };
+
+    videoElement.addEventListener('loadedmetadata', handleLoadedMetadata);
+    return () => {
+      videoElement.removeEventListener('loadedmetadata', handleLoadedMetadata);
+    };
+  }, [selectedClip]);
+
+  useEffect(() => {
+    return () => {
+      clips.forEach((clip) => URL.revokeObjectURL(clip.url));
+      if (mergedVideoUrl) {
+        URL.revokeObjectURL(mergedVideoUrl);
+      }
+    };
+  }, [clips, mergedVideoUrl]);
+
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
 
+  const appendClip = (clip) => {
+    setClips((prev) => [...prev, clip]);
+  };
+
   const handleFileSelect = async (event) => {
-    const files = Array.from(event.target.files);
+    const files = Array.from(event.target.files ?? []);
 
-    for (const file of files) {
-      const url = URL.createObjectURL(file);
-      const video = document.createElement('video');
+    await Promise.all(
+      files.map(
+        (file) =>
+          new Promise((resolve) => {
+            const url = URL.createObjectURL(file);
 
-      video.onloadedmetadata = () => {
-        const newClip = {
-          id: Date.now() + Math.random(),
-          name: file.name,
-          type: file.type.includes('video') ? 'video' : 'image',
-          url,
-          duration: video.duration || 3, // Default 3s for images
-          file,
-          width: video.videoWidth,
-          height: video.videoHeight,
-          trimStart: 0,
-          trimEnd: video.duration || 3,
-          transition: 'fade',
-          // Per-clip effects
-          effects: {
-            brightness: 0,
-            contrast: 100,
-            saturation: 100,
-            speed: 1,
-            blur: 0,
-            grayscale: 0,
-            fadeIn: 0,
-            fadeOut: 0,
-            volume: 100,
-          },
-        };
+            if (file.type.startsWith('image/')) {
+              const image = new Image();
+              image.onload = () => {
+                appendClip({
+                  id: `${Date.now()}-${Math.random()}`,
+                  name: file.name,
+                  type: 'image',
+                  url,
+                  file,
+                  width: image.naturalWidth,
+                  height: image.naturalHeight,
+                  duration: DEFAULT_IMAGE_DURATION,
+                  trimStart: 0,
+                  trimEnd: DEFAULT_IMAGE_DURATION,
+                  sourceDuration: DEFAULT_IMAGE_DURATION,
+                  transition: 'cut',
+                  effects: createDefaultEffects(),
+                });
+                resolve();
+              };
+              image.onerror = resolve;
+              image.src = url;
+              return;
+            }
 
-        setClips((prev) => [...prev, newClip]);
-      };
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            video.onloadedmetadata = () => {
+              const safeDuration = Number.isFinite(video.duration) && video.duration > 0
+                ? video.duration
+                : DEFAULT_IMAGE_DURATION;
 
-      video.src = url;
-    }
+              appendClip({
+                id: `${Date.now()}-${Math.random()}`,
+                name: file.name,
+                type: 'video',
+                url,
+                file,
+                width: video.videoWidth,
+                height: video.videoHeight,
+                duration: safeDuration,
+                trimStart: 0,
+                trimEnd: safeDuration,
+                sourceDuration: safeDuration,
+                transition: 'cut',
+                effects: createDefaultEffects(),
+              });
+              resolve();
+            };
+            video.onerror = resolve;
+            video.src = url;
+          })
+      )
+    );
 
     event.target.value = '';
   };
 
-  // Select clip and load its effects
+  const updateClip = (index, updater) => {
+    setClips((prev) => {
+      const next = [...prev];
+      next[index] = updater(next[index]);
+      return next;
+    });
+  };
+
   const selectClip = (index) => {
     setSelectedClipIndex(index);
-    if (videoRef.current && clips[index]) {
-      videoRef.current.src = clips[index].url;
-      setDuration(clips[index].duration);
-      setCurrentTime(0);
-    }
+    setPreviewTime(0);
   };
 
-  // Update clip effects
-  const updateClipEffect = (index, effectName, value) => {
-    setClips((prev) => {
-      const updated = [...prev];
-      updated[index] = {
-        ...updated[index],
-        effects: {
-          ...updated[index].effects,
-          [effectName]: value,
-        },
-      };
-      return updated;
-    });
-
-    // Apply effect to preview
-    if (selectedClipIndex === index && videoRef.current) {
-      applyEffectsToVideo(videoRef.current, clips[index].effects);
-    }
-  };
-
-  // Apply effects to video element (preview)
-  const applyEffectsToVideo = (videoElement, effects) => {
-    const brightness = effects.brightness;
-    const contrast = effects.contrast;
-    const saturation = effects.saturation;
-    const blur = effects.blur;
-    const grayscale = effects.grayscale;
-
-    const filter = `brightness(${1 + brightness / 100}) contrast(${contrast / 100}) saturate(${
-      saturation / 100
-    }) blur(${blur}px) grayscale(${grayscale / 100})`;
-
-    videoElement.style.filter = filter;
-  };
-
-  // Update clip transition
-  const updateClipTransition = (index, transitionType) => {
-    setClips((prev) => {
-      const updated = [...prev];
-      updated[index] = {
-        ...updated[index],
-        transition: transitionType,
-      };
-      return updated;
-    });
-  };
-
-  // Remove clip
-  const removeClip = (index) => {
-    setClips((prev) => prev.filter((_, i) => i !== index));
-    if (selectedClipIndex === index) {
-      setSelectedClipIndex(null);
-    }
-  };
-
-  // Reorder clips
   const moveClip = (index, direction) => {
-    if (
-      (direction === -1 && index === 0) ||
-      (direction === 1 && index === clips.length - 1)
-    ) {
+    if ((direction === -1 && index === 0) || (direction === 1 && index === clips.length - 1)) {
       return;
     }
 
-    const newClips = [...clips];
-    [newClips[index], newClips[index + direction]] = [
-      newClips[index + direction],
-      newClips[index],
-    ];
-    setClips(newClips);
+    setClips((prev) => {
+      const next = [...prev];
+      [next[index], next[index + direction]] = [next[index + direction], next[index]];
+      return next;
+    });
+    setSelectedClipIndex(index + direction);
   };
 
-  // Format time
-  const formatTime = (seconds) => {
-    if (!seconds || isNaN(seconds)) return '0:00';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  const removeClip = (index) => {
+    setClips((prev) => prev.filter((_, clipIndex) => clipIndex !== index));
+    if (selectedClipIndex === index) {
+      setSelectedClipIndex(null);
+      setPreviewTime(0);
+      setPreviewDuration(0);
+    } else if (selectedClipIndex !== null && selectedClipIndex > index) {
+      setSelectedClipIndex(selectedClipIndex - 1);
+    }
   };
 
-  // Calculate total duration
-  const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
+  const updateClipEffect = (index, effectName, value) => {
+    updateClip(index, (clip) => ({
+      ...clip,
+      effects: {
+        ...clip.effects,
+        [effectName]: value,
+      },
+    }));
+  };
 
-  // Build FFmpeg filter chain for a clip
-  const buildFilterChain = (clipIndex, inputLabel) => {
-    const clip = clips[clipIndex];
-    const effects = clip.effects;
-    let filters = [];
+  const updateClipTransition = (index, transition) => {
+    updateClip(index, (clip) => ({
+      ...clip,
+      transition,
+    }));
+  };
 
-    // Video filters
-    filters.push(
-      `[${inputLabel}]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[scaled${clipIndex}]`
-    );
+  const updateImageDuration = (index, nextDuration) => {
+    const safeDuration = Math.max(MIN_CLIP_DURATION, nextDuration);
+    updateClip(index, (clip) => ({
+      ...clip,
+      duration: safeDuration,
+      trimEnd: safeDuration,
+      sourceDuration: safeDuration,
+    }));
+  };
 
-    // Apply effects
-    const brightness = 1 + effects.brightness / 100;
-    const contrast = effects.contrast / 100;
-    const saturation = effects.saturation / 100;
-    const blur = effects.blur;
-    const grayscale = effects.grayscale / 100;
-
-    let effectFilter = `[scaled${clipIndex}]`;
-    effectFilter += `eq=brightness=${brightness}:contrast=${contrast}`;
-    effectFilter += `,hue=s=${saturation}`;
-    if (blur > 0) effectFilter += `,boxblur=${blur}`;
-    if (grayscale > 0) effectFilter += `,format=gray`;
-    effectFilter += `[v${clipIndex}]`;
-    filters.push(effectFilter);
-
-    // Handle fade in/out
-    if (effects.fadeIn > 0 || effects.fadeOut > 0) {
-      const duration = clip.trimEnd - clip.trimStart;
-      let fadeFilter = `[v${clipIndex}]`;
-
-      if (effects.fadeIn > 0) {
-        fadeFilter += `fade=t=in:st=0:d=${effects.fadeIn}`;
+  const updateTrimValue = (index, field, rawValue) => {
+    updateClip(index, (clip) => {
+      if (clip.type !== 'video') {
+        return clip;
       }
-      if (effects.fadeOut > 0) {
-        fadeFilter += `,fade=t=out:st=${duration - effects.fadeOut}:d=${effects.fadeOut}`;
+
+      const sourceDuration = clip.sourceDuration ?? clip.duration;
+      const nextValue = clamp(rawValue, 0, sourceDuration);
+      let nextTrimStart = field === 'trimStart' ? nextValue : clip.trimStart;
+      let nextTrimEnd = field === 'trimEnd' ? nextValue : clip.trimEnd;
+
+      if (nextTrimEnd - nextTrimStart < MIN_CLIP_DURATION) {
+        if (field === 'trimStart') {
+          nextTrimStart = Math.max(0, nextTrimEnd - MIN_CLIP_DURATION);
+        } else {
+          nextTrimEnd = Math.min(sourceDuration, nextTrimStart + MIN_CLIP_DURATION);
+        }
       }
-      fadeFilter += `[vfaded${clipIndex}]`;
-      filters.push(fadeFilter);
+
+      return {
+        ...clip,
+        trimStart: nextTrimStart,
+        trimEnd: nextTrimEnd,
+      };
+    });
+  };
+
+  const markCurrentTime = (field) => {
+    if (!selectedClip || selectedClip.type !== 'video' || !previewVideoRef.current) {
+      return;
     }
 
-    return filters;
+    updateTrimValue(selectedClipIndex, field, previewVideoRef.current.currentTime);
   };
 
-  // Export video with FFmpeg
+  const renderSegment = async (ffmpeg, clip, index) => {
+    const extension = getFileExtension(clip.file);
+    const inputName = `input-${index}.${extension}`;
+    const outputName = `segment-${index}.mp4`;
+    const fileData = new Uint8Array(await clip.file.arrayBuffer());
+    await ffmpeg.writeFile(inputName, fileData);
+
+    const outputDuration = getRenderedClipDuration(clip);
+    const videoFilter = buildVideoFilter(clip, outputDuration);
+
+    if (clip.type === 'image') {
+      const args = [
+        '-loop',
+        '1',
+        '-t',
+        `${outputDuration}`,
+        '-i',
+        inputName,
+        '-vf',
+        videoFilter,
+        '-an',
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        '+faststart',
+        outputName,
+      ];
+
+      const exitCode = await ffmpeg.exec(args);
+      if (exitCode !== 0) {
+        throw new Error(`Failed rendering image clip ${clip.name}`);
+      }
+      return outputName;
+    }
+
+    const trimmedDuration = getBaseClipDuration(clip);
+    const args = [
+      '-ss',
+      `${clip.trimStart}`,
+      '-t',
+      `${trimmedDuration}`,
+      '-i',
+      inputName,
+      '-vf',
+      videoFilter,
+      '-an',
+      '-c:v',
+      'libx264',
+      '-pix_fmt',
+      'yuv420p',
+      '-movflags',
+      '+faststart',
+      outputName,
+    ];
+
+    const exitCode = await ffmpeg.exec(args);
+    if (exitCode !== 0) {
+      throw new Error(`Failed rendering video clip ${clip.name}`);
+    }
+    return outputName;
+  };
+
   const handleExport = async () => {
     if (!ffmpegReady || !ffmpegRef.current || clips.length === 0) {
-      alert('FFmpeg not ready or no clips to export');
+      setExportStatus('Video engine not ready or no clips selected');
       return;
     }
 
     setIsExporting(true);
     setExportProgress(0);
-    setExportStatus('Starting export...');
+    setExportStatus('Preparing clips...');
 
     try {
       const ffmpeg = ffmpegRef.current;
+      const renderedSegments = [];
 
-      // Clear any previous files
-      try {
-        for (let i = 0; i < clips.length; i++) {
-          await ffmpeg.deleteFile(`input${i}.mp4`);
-        }
-        await ffmpeg.deleteFile('concat.txt');
-        await ffmpeg.deleteFile('output.mp4');
-      } catch (e) {
-        // Files might not exist
+      for (let index = 0; index < clips.length; index += 1) {
+        setExportStatus(`Rendering clip ${index + 1} of ${clips.length}`);
+        const segmentPath = await renderSegment(ffmpeg, clips[index], index);
+        renderedSegments.push(segmentPath);
       }
 
-      // Write each clip to FFmpeg
-      setExportStatus('Loading video files...');
-      for (let i = 0; i < clips.length; i++) {
-        const response = await fetch(clips[i].url);
-        const data = await response.arrayBuffer();
-        await ffmpeg.writeFile(`input${i}.mp4`, new Uint8Array(data));
-      }
+      const concatFile = renderedSegments.map((segmentPath) => `file '${segmentPath}'`).join('\n');
+      await ffmpeg.writeFile('concat.txt', concatFile);
 
-      // Create concat demuxer file
-      let concatContent = '';
-      for (let i = 0; i < clips.length; i++) {
-        concatContent += `file 'input${i}.mp4'\n`;
-      }
-      await ffmpeg.writeFile('concat.txt', concatContent);
-
-      setExportStatus('Concatenating and merging videos...');
-
-      // Run FFmpeg command to concatenate
-      const cmd = [
+      setExportStatus('Merging rendered clips...');
+      const mergeExitCode = await ffmpeg.exec([
         '-f',
         'concat',
         '-safe',
@@ -301,59 +485,53 @@ const VideoEditorPage = () => {
         'concat.txt',
         '-c',
         'copy',
-        '-movflags',
-        '+faststart',
-        'output.mp4',
-      ];
+        'merged-output.mp4',
+      ]);
 
-      await ffmpeg.exec(cmd);
+      if (mergeExitCode !== 0) {
+        throw new Error('Final merge failed');
+      }
 
-      setExportStatus('Finalizing export...');
+      const mergedData = await ffmpeg.readFile('merged-output.mp4');
+      const nextMergedUrl = URL.createObjectURL(
+        new Blob([mergedData.buffer], { type: 'video/mp4' })
+      );
 
-      // Get output file
-      const data = await ffmpeg.readFile('output.mp4');
-      const blob = new Blob([data.buffer], { type: 'video/mp4' });
-      const url = URL.createObjectURL(blob);
+      if (mergedVideoUrl) {
+        URL.revokeObjectURL(mergedVideoUrl);
+      }
 
-      // Download file
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `merged-video-${Date.now()}.mp4`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      setMergedVideoUrl(nextMergedUrl);
+      setExportStatus('Merged video ready');
 
-      setMergedVideoUrl(url);
-      setExportStatus('Export completed successfully!');
-      alert('Video exported successfully!');
-    } catch (err) {
-      console.error('Export error:', err);
-      setExportStatus(`Export failed: ${err.message}`);
-      alert('Export failed: ' + err.message);
+      const link = document.createElement('a');
+      link.href = nextMergedUrl;
+      link.download = `merged-video-${Date.now()}.mp4`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (error) {
+      console.error('Export error:', error);
+      setExportStatus(`Export failed: ${error.message}`);
     } finally {
       setIsExporting(false);
-      setExportProgress(0);
     }
   };
-
-  const selectedClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
 
   return (
     <div className="video-editor-page">
       <div className="video-editor-header">
-        <h1>🎬 Video Editor</h1>
+        <h1>Video Editor</h1>
         <div className="header-buttons">
-          <button className="upload-btn-video" onClick={handleUploadClick} title="Upload video or image clips">
-            + Upload Clip
+          <button className="upload-btn-video" onClick={handleUploadClick}>
+            Add Video or Image
           </button>
           <button
             className="export-btn-video"
             onClick={handleExport}
-            disabled={clips.length === 0 || isExporting}
-            title="Export as MP4 with all effects applied"
+            disabled={!ffmpegReady || isExporting || clips.length === 0}
           >
-            {isExporting ? `🔄 Exporting ${exportProgress}%` : '⬇️ Export MP4'}
+            {isExporting ? `Exporting ${exportProgress}%` : 'Merge and Export MP4'}
           </button>
         </div>
       </div>
@@ -361,8 +539,8 @@ const VideoEditorPage = () => {
       <input
         ref={fileInputRef}
         type="file"
-        multiple
         accept="video/*,image/*"
+        multiple
         onChange={handleFileSelect}
         style={{ display: 'none' }}
       />
@@ -370,48 +548,149 @@ const VideoEditorPage = () => {
       <div className="export-status">{exportStatus}</div>
 
       <div className="video-editor-main">
-        {/* Preview Panel */}
-        <div className="video-editor-preview">
+        <section className="video-editor-preview">
           <div className="preview-header">
-            <h3>📹 Selected Clip Preview</h3>
+            <h3>Selected Clip Preview</h3>
+            {selectedClip ? (
+              <span className="preview-timestamp">
+                Preview {formatTime(previewTime)} / {formatTime(previewDuration)}
+              </span>
+            ) : null}
           </div>
+
           <div className="preview-window">
             {selectedClip ? (
-              <video
-                ref={videoRef}
-                controls
-                style={{ maxWidth: '100%', maxHeight: '100%' }}
-                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-              />
+              selectedClip.type === 'video' ? (
+                <video
+                  ref={previewVideoRef}
+                  controls
+                  onTimeUpdate={(event) => setPreviewTime(event.currentTarget.currentTime)}
+                  onLoadedMetadata={(event) => setPreviewDuration(event.currentTarget.duration)}
+                />
+              ) : (
+                <img className="preview-image" src={selectedClip.url} alt={selectedClip.name} />
+              )
             ) : (
-              <div className="preview-placeholder">Select a clip to preview</div>
+              <div className="preview-placeholder">Select a timeline clip to preview and edit</div>
             )}
           </div>
-        </div>
 
-        {/* Sidebar - Effects Panel */}
-        <div className="video-editor-sidebar">
+          {mergedVideoUrl ? (
+            <div className="merged-preview-panel">
+              <div className="preview-header">
+                <h3>Merged Output</h3>
+              </div>
+              <div className="preview-window preview-window-merged">
+                <video ref={mergedVideoRef} src={mergedVideoUrl} controls />
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <aside className="video-editor-sidebar">
           {selectedClip ? (
             <div className="effects-panel">
-              <h3>⚙️ Edit Clip</h3>
+              <h3>Edit Clip</h3>
               <p className="clip-name-display">{selectedClip.name}</p>
 
-              {/* Video Filters */}
               <div className="effects-section">
-                <h4>📊 Video Filters</h4>
+                <h4>Timeline Timestamps</h4>
+                <div className="timeline-stamp-grid">
+                  <div className="stamp-card">
+                    <span>Timeline Start</span>
+                    <strong>{formatTime(timelineData[selectedClipIndex]?.start ?? 0)}</strong>
+                  </div>
+                  <div className="stamp-card">
+                    <span>Timeline End</span>
+                    <strong>{formatTime(timelineData[selectedClipIndex]?.end ?? 0)}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div className="effects-section">
+                <h4>Trim by Timestamp</h4>
+                {selectedClip.type === 'video' ? (
+                  <>
+                    <div className="time-input-row">
+                      <label htmlFor="trim-start">Start</label>
+                      <input
+                        id="trim-start"
+                        className="time-input"
+                        type="number"
+                        min="0"
+                        max={selectedClip.sourceDuration}
+                        step="0.1"
+                        value={selectedClip.trimStart}
+                        onChange={(event) =>
+                          updateTrimValue(
+                            selectedClipIndex,
+                            'trimStart',
+                            Number(event.target.value)
+                          )
+                        }
+                      />
+                      <button className="stamp-action" onClick={() => markCurrentTime('trimStart')}>
+                        Use Preview Time
+                      </button>
+                    </div>
+                    <div className="time-input-row">
+                      <label htmlFor="trim-end">End</label>
+                      <input
+                        id="trim-end"
+                        className="time-input"
+                        type="number"
+                        min="0"
+                        max={selectedClip.sourceDuration}
+                        step="0.1"
+                        value={selectedClip.trimEnd}
+                        onChange={(event) =>
+                          updateTrimValue(
+                            selectedClipIndex,
+                            'trimEnd',
+                            Number(event.target.value)
+                          )
+                        }
+                      />
+                      <button className="stamp-action" onClick={() => markCurrentTime('trimEnd')}>
+                        Use Preview Time
+                      </button>
+                    </div>
+                    <p className="trim-summary">
+                      Clip Length {formatTime(getBaseClipDuration(selectedClip))}
+                    </p>
+                  </>
+                ) : (
+                  <div className="time-input-row single-row">
+                    <label htmlFor="image-duration">Image Duration</label>
+                    <input
+                      id="image-duration"
+                      className="time-input"
+                      type="number"
+                      min={MIN_CLIP_DURATION}
+                      step="0.1"
+                      value={selectedClip.duration}
+                      onChange={(event) =>
+                        updateImageDuration(selectedClipIndex, Number(event.target.value))
+                      }
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="effects-section">
+                <h4>Clip Effects</h4>
 
                 <div className="effect-group">
                   <label>Brightness</label>
                   <input
+                    className="effect-slider"
                     type="range"
                     min="-100"
                     max="100"
                     value={selectedClip.effects.brightness}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'brightness', Number(e.target.value))
+                    onChange={(event) =>
+                      updateClipEffect(selectedClipIndex, 'brightness', Number(event.target.value))
                     }
-                    className="effect-slider"
                   />
                   <span className="effect-value">{selectedClip.effects.brightness}</span>
                 </div>
@@ -419,14 +698,14 @@ const VideoEditorPage = () => {
                 <div className="effect-group">
                   <label>Contrast</label>
                   <input
+                    className="effect-slider"
                     type="range"
                     min="0"
                     max="200"
                     value={selectedClip.effects.contrast}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'contrast', Number(e.target.value))
+                    onChange={(event) =>
+                      updateClipEffect(selectedClipIndex, 'contrast', Number(event.target.value))
                     }
-                    className="effect-slider"
                   />
                   <span className="effect-value">{selectedClip.effects.contrast}%</span>
                 </div>
@@ -434,14 +713,14 @@ const VideoEditorPage = () => {
                 <div className="effect-group">
                   <label>Saturation</label>
                   <input
+                    className="effect-slider"
                     type="range"
                     min="0"
                     max="200"
                     value={selectedClip.effects.saturation}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'saturation', Number(e.target.value))
+                    onChange={(event) =>
+                      updateClipEffect(selectedClipIndex, 'saturation', Number(event.target.value))
                     }
-                    className="effect-slider"
                   />
                   <span className="effect-value">{selectedClip.effects.saturation}%</span>
                 </div>
@@ -449,14 +728,14 @@ const VideoEditorPage = () => {
                 <div className="effect-group">
                   <label>Blur</label>
                   <input
+                    className="effect-slider"
                     type="range"
                     min="0"
                     max="20"
                     value={selectedClip.effects.blur}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'blur', Number(e.target.value))
+                    onChange={(event) =>
+                      updateClipEffect(selectedClipIndex, 'blur', Number(event.target.value))
                     }
-                    className="effect-slider"
                   />
                   <span className="effect-value">{selectedClip.effects.blur}px</span>
                 </div>
@@ -464,45 +743,77 @@ const VideoEditorPage = () => {
                 <div className="effect-group">
                   <label>Grayscale</label>
                   <input
+                    className="effect-slider"
                     type="range"
                     min="0"
                     max="100"
                     value={selectedClip.effects.grayscale}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'grayscale', Number(e.target.value))
+                    onChange={(event) =>
+                      updateClipEffect(selectedClipIndex, 'grayscale', Number(event.target.value))
                     }
-                    className="effect-slider"
                   />
                   <span className="effect-value">{selectedClip.effects.grayscale}%</span>
                 </div>
 
+                {selectedClip.type === 'video' ? (
+                  <div className="effect-group">
+                    <label>Speed</label>
+                    <input
+                      className="effect-slider"
+                      type="range"
+                      min="0.25"
+                      max="2"
+                      step="0.25"
+                      value={selectedClip.effects.speed}
+                      onChange={(event) =>
+                        updateClipEffect(selectedClipIndex, 'speed', Number(event.target.value))
+                      }
+                    />
+                    <span className="effect-value">{selectedClip.effects.speed}x</span>
+                  </div>
+                ) : null}
+
                 <div className="effect-group">
-                  <label>Speed</label>
+                  <label>Fade In</label>
                   <input
-                    type="range"
-                    min="0.25"
-                    max="2"
-                    step="0.25"
-                    value={selectedClip.effects.speed}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'speed', Number(e.target.value))
-                    }
                     className="effect-slider"
+                    type="range"
+                    min="0"
+                    max="5"
+                    step="0.1"
+                    value={selectedClip.effects.fadeIn}
+                    onChange={(event) =>
+                      updateClipEffect(selectedClipIndex, 'fadeIn', Number(event.target.value))
+                    }
                   />
-                  <span className="effect-value">{selectedClip.effects.speed}x</span>
+                  <span className="effect-value">{selectedClip.effects.fadeIn.toFixed(1)}s</span>
+                </div>
+
+                <div className="effect-group">
+                  <label>Fade Out</label>
+                  <input
+                    className="effect-slider"
+                    type="range"
+                    min="0"
+                    max="5"
+                    step="0.1"
+                    value={selectedClip.effects.fadeOut}
+                    onChange={(event) =>
+                      updateClipEffect(selectedClipIndex, 'fadeOut', Number(event.target.value))
+                    }
+                  />
+                  <span className="effect-value">{selectedClip.effects.fadeOut.toFixed(1)}s</span>
                 </div>
               </div>
 
-              {/* Transitions */}
               <div className="effects-section">
-                <h4>✨ Transition Effect</h4>
+                <h4>Transition</h4>
                 <div className="transition-options">
                   {Object.entries(TRANSITIONS).map(([key, transition]) => (
                     <button
                       key={key}
                       className={`transition-btn ${selectedClip.transition === key ? 'active' : ''}`}
                       onClick={() => updateClipTransition(selectedClipIndex, key)}
-                      title={`${transition.name} (${transition.duration}s)`}
                     >
                       {transition.name}
                     </button>
@@ -510,70 +821,14 @@ const VideoEditorPage = () => {
                 </div>
               </div>
 
-              {/* Fade In/Out */}
-              <div className="effects-section">
-                <h4>🎭 Fade Effects</h4>
-
-                <div className="effect-group">
-                  <label>Fade In (s)</label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="5"
-                    step="0.1"
-                    value={selectedClip.effects.fadeIn}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'fadeIn', Number(e.target.value))
-                    }
-                    className="effect-slider"
-                  />
-                  <span className="effect-value">{selectedClip.effects.fadeIn.toFixed(1)}s</span>
-                </div>
-
-                <div className="effect-group">
-                  <label>Fade Out (s)</label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="5"
-                    step="0.1"
-                    value={selectedClip.effects.fadeOut}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'fadeOut', Number(e.target.value))
-                    }
-                    className="effect-slider"
-                  />
-                  <span className="effect-value">{selectedClip.effects.fadeOut.toFixed(1)}s</span>
-                </div>
-              </div>
-
-              {/* Audio */}
-              <div className="effects-section">
-                <h4>🔊 Audio</h4>
-                <div className="effect-group">
-                  <label>Volume</label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="200"
-                    value={selectedClip.effects.volume}
-                    onChange={(e) =>
-                      updateClipEffect(selectedClipIndex, 'volume', Number(e.target.value))
-                    }
-                    className="effect-slider"
-                  />
-                  <span className="effect-value">{selectedClip.effects.volume}%</span>
-                </div>
-              </div>
-
-              {/* Clip Info */}
               <div className="clip-info">
-                <h4>📋 Clip Info</h4>
+                <h4>Clip Info</h4>
                 <p>
-                  <strong>Duration:</strong> {formatTime(selectedClip.duration)}
+                  <strong>Rendered Length:</strong> {formatTime(getRenderedClipDuration(selectedClip))}
                 </p>
                 <p>
-                  <strong>Resolution:</strong> {selectedClip.width ? `${selectedClip.width}x${selectedClip.height}` : 'N/A'}
+                  <strong>Resolution:</strong>{' '}
+                  {selectedClip.width ? `${selectedClip.width}x${selectedClip.height}` : 'Unknown'}
                 </p>
                 <p>
                   <strong>Type:</strong> {selectedClip.type}
@@ -581,103 +836,97 @@ const VideoEditorPage = () => {
               </div>
             </div>
           ) : (
-            <div className="no-selection">Select a clip to edit effects</div>
+            <div className="no-selection">Select a clip to edit timestamps, trim, and effects</div>
           )}
-        </div>
+        </aside>
       </div>
 
-      {/* Timeline */}
-      <div className="video-editor-timeline">
+      <section className="video-editor-timeline">
         <div className="timeline-header">
-          <h3>📽️ Timeline - Total: {formatTime(totalDuration)}</h3>
+          <h3>Timeline</h3>
+          <span className="timeline-total">Total {formatTime(totalDuration)}</span>
         </div>
+
         <div className="timeline-tracks">
-          {clips.map((clip, index) => (
-            <div
-              key={clip.id}
-              className={`timeline-clip ${selectedClipIndex === index ? 'selected' : ''}`}
-              onClick={() => selectClip(index)}
-              style={{
-                flex: `${clip.duration}`,
-              }}
-            >
-              <div className="clip-content">
-                <span className="clip-name">{clip.name}</span>
-                <span className="clip-duration">{formatTime(clip.duration)}</span>
-                {clip.effects.brightness !== 0 ||
-                clip.effects.contrast !== 100 ||
-                clip.effects.saturation !== 100 ? (
-                  <span className="effects-indicator">⚙️ Effects</span>
+          {clips.map((clip, index) => {
+            const range = timelineData[index];
+            return (
+              <div
+                key={clip.id}
+                className={`timeline-clip ${selectedClipIndex === index ? 'selected' : ''}`}
+                onClick={() => selectClip(index)}
+                style={{ flex: getRenderedClipDuration(clip) }}
+              >
+                <div className="clip-content">
+                  <span className="clip-name">{clip.name}</span>
+                  <span className="clip-duration">{formatTime(getRenderedClipDuration(clip))}</span>
+                  <span className="clip-timestamps">
+                    {formatTime(range.start)} - {formatTime(range.end)}
+                  </span>
+                </div>
+
+                <div className="clip-controls">
+                  <button
+                    className="clip-move-btn"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      moveClip(index, -1);
+                    }}
+                    disabled={index === 0}
+                  >
+                    ◀
+                  </button>
+                  <button
+                    className="clip-move-btn"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      moveClip(index, 1);
+                    }}
+                    disabled={index === clips.length - 1}
+                  >
+                    ▶
+                  </button>
+                  <button
+                    className="clip-delete-btn"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      removeClip(index);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {index < clips.length - 1 ? (
+                  <div className="transition-indicator">{TRANSITIONS[clip.transition].name}</div>
                 ) : null}
               </div>
-              <div className="clip-controls">
-                <button
-                  className="clip-move-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    moveClip(index, -1);
-                  }}
-                  disabled={index === 0}
-                  title="Move left"
-                >
-                  ◀
-                </button>
-                <button
-                  className="clip-move-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    moveClip(index, 1);
-                  }}
-                  disabled={index === clips.length - 1}
-                  title="Move right"
-                >
-                  ▶
-                </button>
-                <button
-                  className="clip-delete-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeClip(index);
-                  }}
-                  title="Delete clip"
-                >
-                  ✕
-                </button>
-              </div>
-              {index < clips.length - 1 && (
-                <div className="transition-indicator" title={`${clips[index].transition} transition`}>
-                  {clips[index].transition === 'fade' ? '⟷' : '→'}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-        {clips.length === 0 && (
-          <div className="empty-timeline">
-            <p>No clips yet. Click "Upload Clip" to get started! 🎥</p>
-          </div>
-        )}
-      </div>
+            );
+          })}
 
-      {/* Project Info */}
+          {clips.length === 0 ? (
+            <div className="empty-timeline">
+              <p>Add clips to build a merged timeline</p>
+            </div>
+          ) : null}
+        </div>
+      </section>
+
       <div className="video-editor-info">
         <div className="info-row">
           <span>
             <strong>Clips:</strong> {clips.length}
           </span>
           <span>
-            <strong>Total Duration:</strong> {formatTime(totalDuration)}
+            <strong>Timeline Length:</strong> {formatTime(totalDuration)}
           </span>
           <span>
-            <strong>Total Size:</strong> {(clips.reduce((sum, c) => sum + (c.file?.size || 0), 0) / 1024 / 1024).toFixed(2)} MB
-          </span>
-          <span>
-            <strong>Export Format:</strong> MP4 (H.264)
+            <strong>Output:</strong> MP4 merged video
           </span>
         </div>
       </div>
     </div>
   );
-};
+}
 
 export default VideoEditorPage;

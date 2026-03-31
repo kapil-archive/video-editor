@@ -467,6 +467,13 @@ button {
 	font-weight: 600;
 }
 
+.preview-timestamp,
+.timeline-total {
+	font-size: 12px;
+	color: #8a5a38;
+	font-weight: 600;
+}
+
 .preview-window {
 	width: 100%;
 	padding: 24px;
@@ -492,6 +499,24 @@ button {
 	border-radius: 16px;
 	background: #2a2a2a;
 	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
+.preview-image {
+	width: 100%;
+	max-width: 100%;
+	max-height: 100%;
+	object-fit: contain;
+	border-radius: 16px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+.merged-preview-panel {
+	border-top: 1px solid rgba(110, 78, 55, 0.08);
+	background: rgba(212, 181, 160, 0.04);
+}
+
+.preview-window-merged {
+	min-height: 260px;
 }
 
 .video-editor-sidebar {
@@ -553,6 +578,85 @@ button {
 	font-weight: 600;
 	text-transform: uppercase;
 	letter-spacing: 0.05em;
+}
+
+.timeline-stamp-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.stamp-card {
+	display: grid;
+	gap: 6px;
+	padding: 12px;
+	border-radius: 10px;
+	background: rgba(212, 181, 160, 0.08);
+}
+
+.stamp-card span {
+	font-size: 12px;
+	color: #8a5a38;
+}
+
+.stamp-card strong {
+	font-size: 15px;
+	color: #4a2c1a;
+}
+
+.time-input-row {
+	display: grid;
+	grid-template-columns: 72px minmax(0, 1fr) auto;
+	gap: 10px;
+	align-items: center;
+}
+
+.time-input-row.single-row {
+	grid-template-columns: 110px minmax(0, 1fr);
+}
+
+.time-input-row label {
+	font-size: 13px;
+	font-weight: 500;
+	color: #6b4423;
+}
+
+.time-input {
+	width: 100%;
+	padding: 10px 12px;
+	border: 1px solid rgba(110, 78, 55, 0.2);
+	border-radius: 8px;
+	font-size: 14px;
+	background: rgba(255, 255, 255, 0.65);
+	color: #4a2c1a;
+}
+
+.time-input:focus {
+	outline: none;
+	border-color: #d4b5a0;
+	box-shadow: 0 0 0 3px rgba(212, 181, 160, 0.12);
+}
+
+.stamp-action {
+	padding: 10px 12px;
+	border-radius: 8px;
+	background: rgba(107, 68, 35, 0.08);
+	border: 1px solid rgba(110, 78, 55, 0.16);
+	color: #6b4423;
+	font-size: 12px;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.stamp-action:hover {
+	background: rgba(107, 68, 35, 0.14);
+}
+
+.trim-summary {
+	margin: 0;
+	font-size: 12px;
+	color: #8a5a38;
+	font-weight: 600;
 }
 
 .effect-group {
@@ -754,6 +858,14 @@ button {
 	font-weight: 500;
 }
 
+.clip-timestamps {
+	font-size: 10px;
+	line-height: 1.4;
+	padding: 4px 6px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.18);
+}
+
 .effects-indicator {
 	font-size: 9px;
 	background: rgba(255, 255, 255, 0.2);
@@ -890,6 +1002,12 @@ button {
 	.effect-group {
 		grid-template-columns: 70px 1fr 40px;
 		gap: 8px;
+	}
+
+	.timeline-stamp-grid,
+	.time-input-row,
+	.time-input-row.single-row {
+		grid-template-columns: 1fr;
 	}
 
 	.effect-group label {
