@@ -4,6 +4,11 @@ import { toBlobURL } from '@ffmpeg/util';
 
 const DEFAULT_IMAGE_DURATION = 3;
 const MIN_CLIP_DURATION = 0.2;
+const EXPORT_WIDTH = 960;
+const EXPORT_HEIGHT = 540;
+const EXPORT_FPS = 24;
+const EXPORT_PRESET = 'ultrafast';
+const EXPORT_CRF = 30;
 const TRANSITIONS = {
   cut: { name: 'Cut', duration: 0 },
   fade: { name: 'Fade', duration: 0.5 },
@@ -76,8 +81,8 @@ const getFileExtension = (file) => {
 const buildVideoFilter = (clip, outputDuration) => {
   const effects = clip.effects;
   const filters = [
-    'scale=1280:720:force_original_aspect_ratio=decrease',
-    'pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black',
+    `scale=${EXPORT_WIDTH}:${EXPORT_HEIGHT}:force_original_aspect_ratio=decrease`,
+    `pad=${EXPORT_WIDTH}:${EXPORT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black`,
     `eq=brightness=${(effects.brightness / 100).toFixed(2)}:contrast=${Math.max(
       0,
       effects.contrast / 100
@@ -106,7 +111,7 @@ const buildVideoFilter = (clip, outputDuration) => {
     );
   }
 
-  filters.push('fps=30');
+  filters.push(`fps=${EXPORT_FPS}`);
   return filters.join(',');
 };
 
@@ -435,10 +440,12 @@ function VideoEditorPage() {
         '-an',
         '-c:v',
         'libx264',
+        '-preset',
+        EXPORT_PRESET,
+        '-crf',
+        `${EXPORT_CRF}`,
         '-pix_fmt',
         'yuv420p',
-        '-movflags',
-        '+faststart',
         outputName,
       ];
 
@@ -462,10 +469,12 @@ function VideoEditorPage() {
       '-an',
       '-c:v',
       'libx264',
+      '-preset',
+      EXPORT_PRESET,
+      '-crf',
+      `${EXPORT_CRF}`,
       '-pix_fmt',
       'yuv420p',
-      '-movflags',
-      '+faststart',
       outputName,
     ];
 
@@ -949,7 +958,7 @@ function VideoEditorPage() {
             <strong>Timeline Length:</strong> {formatTime(totalDuration)}
           </span>
           <span>
-            <strong>Output:</strong> MP4 merged video
+            <strong>Output:</strong> MP4 quick export {EXPORT_WIDTH}x{EXPORT_HEIGHT} @ {EXPORT_FPS}fps
           </span>
         </div>
       </div>
