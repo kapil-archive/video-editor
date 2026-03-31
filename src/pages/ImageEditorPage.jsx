@@ -22,6 +22,7 @@ const DEFAULT_TEXT = {
 
 function ImageEditorPage() {
   const canvasElementRef = useRef(null)
+  const fileInputRef = useRef(null)
   const canvasRef = useRef(null)
   const imageRef = useRef(null)
   const objectUrlRef = useRef(null)
@@ -33,6 +34,54 @@ function ImageEditorPage() {
   const [hasImage, setHasImage] = useState(false)
   const [selectedText, setSelectedText] = useState(false)
   const [imageName, setImageName] = useState('Sample artwork')
+  const [previewImageUrl, setPreviewImageUrl] = useState(heroImage)
+  const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 })
+  const [uploadError, setUploadError] = useState('')
+
+  const loadImageFromUrl = async (url, name) => {
+    const canvas = canvasRef.current
+
+    if (!canvas) {
+      return
+    }
+
+    try {
+      const nextImage = await FabricImage.fromURL(url)
+      const availableWidth = CANVAS_WIDTH - 72
+      const availableHeight = CANVAS_HEIGHT - 72
+      const width = nextImage.width || 1
+      const height = nextImage.height || 1
+      const scale = Math.min(availableWidth / width, availableHeight / height)
+
+      if (imageRef.current) {
+        canvas.remove(imageRef.current)
+      }
+
+      nextImage.set({
+        left: CANVAS_WIDTH / 2,
+        top: CANVAS_HEIGHT / 2,
+        originX: 'center',
+        originY: 'center',
+        selectable: false,
+        evented: false,
+      })
+      nextImage.scale(scale)
+
+      imageRef.current = nextImage
+      canvas.add(nextImage)
+      canvas.sendObjectToBack(nextImage)
+      canvas.renderAll()
+
+      setHasImage(true)
+      setImageName(name)
+      setPreviewImageUrl(url)
+      setImageDimensions({ width, height })
+      setUploadError('')
+      setFilterValues(DEFAULT_FILTERS)
+    } catch {
+      setUploadError('The selected image could not be loaded.')
+    }
+  }
 
   useEffect(() => {
     const canvas = new Canvas(canvasElementRef.current, {
@@ -73,7 +122,13 @@ function ImageEditorPage() {
   }, [])
 
   useEffect(() => {
-    void loadImageFromUrl(heroImage, 'Sample artwork')
+    const frameId = window.requestAnimationFrame(() => {
+      void loadImageFromUrl(heroImage, 'Sample artwork')
+    })
+
+    return () => {
+      window.cancelAnimationFrame(frameId)
+    }
   }, [])
 
   useEffect(() => {
@@ -111,44 +166,6 @@ function ImageEditorPage() {
     canvas.renderAll()
   }, [filterValues])
 
-  const loadImageFromUrl = async (url, name) => {
-    const canvas = canvasRef.current
-
-    if (!canvas) {
-      return
-    }
-
-    const nextImage = await FabricImage.fromURL(url)
-    const availableWidth = CANVAS_WIDTH - 72
-    const availableHeight = CANVAS_HEIGHT - 72
-    const width = nextImage.width || 1
-    const height = nextImage.height || 1
-    const scale = Math.min(availableWidth / width, availableHeight / height)
-
-    if (imageRef.current) {
-      canvas.remove(imageRef.current)
-    }
-
-    nextImage.set({
-      left: CANVAS_WIDTH / 2,
-      top: CANVAS_HEIGHT / 2,
-      originX: 'center',
-      originY: 'center',
-      selectable: false,
-      evented: false,
-    })
-    nextImage.scale(scale)
-
-    imageRef.current = nextImage
-    canvas.add(nextImage)
-    canvas.sendObjectToBack(nextImage)
-    canvas.renderAll()
-
-    setHasImage(true)
-    setImageName(name)
-    setFilterValues(DEFAULT_FILTERS)
-  }
-
   const handleImageUpload = async (event) => {
     const file = event.target.files?.[0]
 
@@ -166,6 +183,10 @@ function ImageEditorPage() {
     await loadImageFromUrl(nextUrl, file.name)
 
     event.target.value = ''
+  }
+
+  const openFilePicker = () => {
+    fileInputRef.current?.click()
   }
 
   const addTextLayer = () => {
@@ -292,12 +313,38 @@ function ImageEditorPage() {
               <span>{imageName}</span>
             </div>
 
-            <label className='upload-field'>
+            <div className='upload-field'>
               <span>Upload image</span>
-              <input accept='image/*' onChange={handleImageUpload} type='file' />
-            </label>
+              <input
+                accept='image/*'
+                className='sr-only-file-input'
+                onChange={handleImageUpload}
+                ref={fileInputRef}
+                type='file'
+              />
+              <button className='ghost-button upload-trigger' onClick={openFilePicker} type='button'>
+                Choose image from device
+              </button>
+            </div>
 
-            <button style={{marginTop:20}} className='ghost-button' onClick={() => void loadImageFromUrl(heroImage, 'Sample artwork')} type='button'>
+            <div className='image-preview-box'>
+              {hasImage ? (
+                <img alt={imageName} className='image-preview' src={previewImageUrl} />
+              ) : (
+                <div className='image-preview-placeholder'>No image selected</div>
+              )}
+            </div>
+
+            {hasImage ? (
+              <div className='image-meta'>
+                <span className='image-meta-label'>Dimensions</span>
+                <span>{imageDimensions.width} x {imageDimensions.height}px</span>
+              </div>
+            ) : null}
+
+            {uploadError ? <p className='upload-error'>{uploadError}</p> : null}
+
+            <button className='ghost-button sample-button' onClick={() => void loadImageFromUrl(heroImage, 'Sample artwork')} type='button'>
               Use sample image
             </button>
           </div>
