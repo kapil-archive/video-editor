@@ -115,6 +115,8 @@ function VideoEditorPage() {
   const mergedVideoRef = useRef(null);
   const fileInputRef = useRef(null);
   const ffmpegRef = useRef(null);
+  const clipsRef = useRef([]);
+  const mergedVideoUrlRef = useRef(null);
 
   const [clips, setClips] = useState([]);
   const [selectedClipIndex, setSelectedClipIndex] = useState(null);
@@ -127,6 +129,9 @@ function VideoEditorPage() {
   const [mergedVideoUrl, setMergedVideoUrl] = useState(null);
 
   const selectedClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
+  const selectedPreviewFilter = selectedClip
+    ? `brightness(${1 + selectedClip.effects.brightness / 100}) contrast(${selectedClip.effects.contrast / 100}) saturate(${selectedClip.effects.saturation / 100}) blur(${selectedClip.effects.blur}px) grayscale(${selectedClip.effects.grayscale / 100})`
+    : 'none';
 
   const timelineData = useMemo(() => {
     let cursor = 0;
@@ -190,9 +195,9 @@ function VideoEditorPage() {
     }
 
     const videoElement = previewVideoRef.current;
-    videoElement.src = selectedClip.url;
     videoElement.playbackRate = selectedClip.effects.speed;
-    videoElement.style.filter = `brightness(${1 + selectedClip.effects.brightness / 100}) contrast(${selectedClip.effects.contrast / 100}) saturate(${selectedClip.effects.saturation / 100}) blur(${selectedClip.effects.blur}px) grayscale(${selectedClip.effects.grayscale / 100})`;
+    videoElement.style.filter = selectedPreviewFilter;
+    videoElement.load();
 
     const handleLoadedMetadata = () => {
       videoElement.currentTime = selectedClip.trimStart;
@@ -203,16 +208,27 @@ function VideoEditorPage() {
     return () => {
       videoElement.removeEventListener('loadedmetadata', handleLoadedMetadata);
     };
-  }, [selectedClip]);
+  }, [selectedClip, selectedPreviewFilter]);
+
+  useEffect(() => {
+    clipsRef.current = clips;
+  }, [clips]);
+
+  useEffect(() => {
+    mergedVideoUrlRef.current = mergedVideoUrl;
+  }, [mergedVideoUrl]);
 
   useEffect(() => {
     return () => {
-      clips.forEach((clip) => URL.revokeObjectURL(clip.url));
-      if (mergedVideoUrl) {
-        URL.revokeObjectURL(mergedVideoUrl);
+      clipsRef.current.forEach((clip) => {
+        URL.revokeObjectURL(clip.url);
+      });
+
+      if (mergedVideoUrlRef.current) {
+        URL.revokeObjectURL(mergedVideoUrlRef.current);
       }
     };
-  }, [clips, mergedVideoUrl]);
+  }, []);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -316,7 +332,15 @@ function VideoEditorPage() {
   };
 
   const removeClip = (index) => {
-    setClips((prev) => prev.filter((_, clipIndex) => clipIndex !== index));
+    setClips((prev) => {
+      const clipToRemove = prev[index];
+      if (clipToRemove) {
+        URL.revokeObjectURL(clipToRemove.url);
+      }
+
+      return prev.filter((_, clipIndex) => clipIndex !== index);
+    });
+
     if (selectedClipIndex === index) {
       setSelectedClipIndex(null);
       setPreviewTime(0);
@@ -562,8 +586,12 @@ function VideoEditorPage() {
             {selectedClip ? (
               selectedClip.type === 'video' ? (
                 <video
+                  key={selectedClip.id}
                   ref={previewVideoRef}
+                  src={selectedClip.url}
+                  preload="metadata"
                   controls
+                  style={{ filter: selectedPreviewFilter }}
                   onTimeUpdate={(event) => setPreviewTime(event.currentTarget.currentTime)}
                   onLoadedMetadata={(event) => setPreviewDuration(event.currentTarget.duration)}
                 />
