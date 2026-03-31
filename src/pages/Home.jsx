@@ -7,6 +7,9 @@ function Home() {
             <Link className='primary-link' to='/editor'>
                 Open image editor
             </Link>
+            <Link className='primary-link' to='/video-editor'>
+                Open video editor
+            </Link>
         </main>
     )
 }
