@@ -14,6 +14,22 @@ const TRANSITIONS = {
   cut: { name: 'Cut', duration: 0 },
   fade: { name: 'Fade', duration: 0.5 },
   dissolve: { name: 'Dissolve', duration: 0.8 },
+  wipeLeft: { name: 'Wipe Left', duration: 0.7 },
+  wipeRight: { name: 'Wipe Right', duration: 0.7 },
+  slideUp: { name: 'Slide Up', duration: 0.6 },
+  zoomIn: { name: 'Zoom In', duration: 0.5 },
+  flash: { name: 'Flash', duration: 0.25 },
+};
+
+const TRANSITION_TO_XFADE = {
+  cut: 'fade',
+  fade: 'fade',
+  dissolve: 'dissolve',
+  wipeLeft: 'wipeleft',
+  wipeRight: 'wiperight',
+  slideUp: 'slideup',
+  zoomIn: 'circleopen',
+  flash: 'fadewhite',
 };
 
 const createDefaultEffects = () => ({
@@ -23,6 +39,10 @@ const createDefaultEffects = () => ({
   speed: 1,
   blur: 0,
   grayscale: 0,
+  hue: 0,
+  sepia: 0,
+  invert: 0,
+  sharpen: 0,
   fadeIn: 0,
   fadeOut: 0,
 });
@@ -121,6 +141,26 @@ const buildVideoFilterFromEffects = (clipType, effects, outputDuration) => {
     filters.push('hue=s=0');
   }
 
+  if (effects.hue !== 0) {
+    filters.push(`hue=h=${effects.hue}`);
+  }
+
+  if (effects.sepia > 0) {
+    // ffmpeg sepia is approximated via colorchannelmixer and blended by amount.
+    filters.push(
+      `colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131:0:0:0:0:1`
+    );
+  }
+
+  if (effects.invert > 0) {
+    filters.push('negate');
+  }
+
+  if (effects.sharpen > 0) {
+    const amount = Math.max(1, Math.round(effects.sharpen));
+    filters.push(`unsharp=5:5:${amount}:5:5:0`);
+  }
+
   if (clipType === 'video' && effects.speed !== 1) {
     filters.push(`setpts=${(1 / effects.speed).toFixed(4)}*PTS`);
   }
@@ -153,6 +193,10 @@ const hasVisualEdits = (clip) => {
     effects.speed !== 1 ||
     effects.blur !== 0 ||
     effects.grayscale !== 0 ||
+    effects.hue !== 0 ||
+    effects.sepia !== 0 ||
+    effects.invert !== 0 ||
+    effects.sharpen !== 0 ||
     effects.fadeIn !== 0 ||
     effects.fadeOut !== 0 ||
     clip.transition !== 'cut'
@@ -229,7 +273,7 @@ function VideoEditorPage() {
     [selectedClip]
   );
   const selectedPreviewFilter = selectedClip
-    ? `brightness(${1 + editorEffects.brightness / 100}) contrast(${editorEffects.contrast / 100}) saturate(${editorEffects.saturation / 100}) blur(${editorEffects.blur}px) grayscale(${editorEffects.grayscale / 100})`
+    ? `brightness(${1 + editorEffects.brightness / 100}) contrast(${editorEffects.contrast / 100}) saturate(${editorEffects.saturation / 100}) blur(${editorEffects.blur}px) grayscale(${editorEffects.grayscale / 100}) sepia(${editorEffects.sepia / 100}) invert(${editorEffects.invert / 100}) hue-rotate(${editorEffects.hue}deg)`
     : 'none';
 
   const timelineData = useMemo(() => {
@@ -1013,28 +1057,89 @@ function VideoEditorPage() {
       }
 
       const renderedSegments = [];
+      const renderedDurations = [];
 
       for (let index = 0; index < clips.length; index += 1) {
         setExportStatus(`Rendering clip ${index + 1} of ${clips.length}`);
         const segmentPath = await renderSegment(ffmpeg, clips[index], index);
         renderedSegments.push(segmentPath);
+        renderedDurations.push(getRenderedClipDuration(clips[index]));
       }
 
-      const concatFile = renderedSegments.map((segmentPath) => `file '${segmentPath}'`).join('\n');
-      await ffmpeg.writeFile('concat.txt', concatFile);
+      const hasTransitionEffects = clips.slice(0, -1).some((clip) => clip.transition !== 'cut');
 
-      setExportStatus('Merging rendered clips...');
-      const mergeExitCode = await ffmpeg.exec([
-        '-f',
-        'concat',
-        '-safe',
-        '0',
-        '-i',
-        'concat.txt',
-        '-c',
-        'copy',
-        'merged-output.mp4',
-      ]);
+      let mergeExitCode = 0;
+      if (!hasTransitionEffects || renderedSegments.length === 1) {
+        const concatFile = renderedSegments.map((segmentPath) => `file '${segmentPath}'`).join('\n');
+        await ffmpeg.writeFile('concat.txt', concatFile);
+
+        setExportStatus('Merging rendered clips...');
+        mergeExitCode = await ffmpeg.exec([
+          '-f',
+          'concat',
+          '-safe',
+          '0',
+          '-i',
+          'concat.txt',
+          '-c',
+          'copy',
+          'merged-output.mp4',
+        ]);
+      } else {
+        setExportStatus('Applying transitions and merging clips...');
+
+        const inputs = [];
+        renderedSegments.forEach((segmentPath) => {
+          inputs.push('-i', segmentPath);
+        });
+
+        const filterParts = [];
+        let cumulativeDuration = renderedDurations[0];
+        let previousLabel = '[0:v]';
+
+        for (let index = 1; index < renderedSegments.length; index += 1) {
+          const transitionKey = clips[index - 1].transition;
+          const transitionType = TRANSITION_TO_XFADE[transitionKey] || 'fade';
+          const configuredDuration = TRANSITIONS[transitionKey]?.duration ?? 0;
+          const maxDuration = Math.max(
+            0.05,
+            Math.min(renderedDurations[index - 1], renderedDurations[index]) - 0.05
+          );
+          const duration = transitionKey === 'cut'
+            ? 0.001
+            : clamp(configuredDuration, 0.05, maxDuration);
+
+          const offset = Math.max(0, cumulativeDuration - duration);
+          const outputLabel = index === renderedSegments.length - 1 ? '[vout]' : `[vx${index}]`;
+
+          filterParts.push(
+            `${previousLabel}[${index}:v]xfade=transition=${transitionType}:duration=${duration.toFixed(
+              3
+            )}:offset=${offset.toFixed(3)}${outputLabel}`
+          );
+
+          previousLabel = outputLabel;
+          cumulativeDuration = cumulativeDuration + renderedDurations[index] - duration;
+        }
+
+        mergeExitCode = await ffmpeg.exec([
+          ...inputs,
+          '-filter_complex',
+          filterParts.join(';'),
+          '-map',
+          '[vout]',
+          '-an',
+          '-c:v',
+          'libx264',
+          '-preset',
+          EXPORT_PRESET,
+          '-crf',
+          `${EXPORT_CRF}`,
+          '-pix_fmt',
+          'yuv420p',
+          'merged-output.mp4',
+        ]);
+      }
 
       if (mergeExitCode !== 0) {
         throw new Error('Final merge failed');
@@ -1396,6 +1501,59 @@ function VideoEditorPage() {
                     onChange={(event) => updateEditorEffect('grayscale', Number(event.target.value))}
                   />
                   <span className="effect-value">{editorEffects.grayscale}%</span>
+                </div>
+
+                <div className="effect-group">
+                  <label>Hue</label>
+                  <input
+                    className="effect-slider"
+                    type="range"
+                    min="-180"
+                    max="180"
+                    value={editorEffects.hue}
+                    onChange={(event) => updateEditorEffect('hue', Number(event.target.value))}
+                  />
+                  <span className="effect-value">{editorEffects.hue}deg</span>
+                </div>
+
+                <div className="effect-group">
+                  <label>Sepia</label>
+                  <input
+                    className="effect-slider"
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={editorEffects.sepia}
+                    onChange={(event) => updateEditorEffect('sepia', Number(event.target.value))}
+                  />
+                  <span className="effect-value">{editorEffects.sepia}%</span>
+                </div>
+
+                <div className="effect-group">
+                  <label>Invert</label>
+                  <input
+                    className="effect-slider"
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={editorEffects.invert}
+                    onChange={(event) => updateEditorEffect('invert', Number(event.target.value))}
+                  />
+                  <span className="effect-value">{editorEffects.invert}%</span>
+                </div>
+
+                <div className="effect-group">
+                  <label>Sharpen</label>
+                  <input
+                    className="effect-slider"
+                    type="range"
+                    min="0"
+                    max="5"
+                    step="1"
+                    value={editorEffects.sharpen}
+                    onChange={(event) => updateEditorEffect('sharpen', Number(event.target.value))}
+                  />
+                  <span className="effect-value">{editorEffects.sharpen}</span>
                 </div>
 
                 {selectedClip.type === 'video' ? (

@@ -909,7 +909,7 @@ button {
 
 .transition-options {
 	display: grid;
-	grid-template-columns: repeat(3, 1fr);
+	grid-template-columns: repeat(auto-fit, minmax(94px, 1fr));
 	gap: 8px;
 	margin-top: 8px;
 }
