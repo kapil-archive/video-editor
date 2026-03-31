@@ -510,6 +510,142 @@ button {
 	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
 }
 
+.preview-video-stack {
+	width: 100%;
+	display: grid;
+	gap: 14px;
+}
+
+.frame-toolbar {
+	display: grid;
+	grid-template-columns: auto auto auto auto minmax(220px, 1fr);
+	gap: 10px;
+	align-items: center;
+}
+
+.frame-readout {
+	display: grid;
+	gap: 4px;
+	padding: 10px 12px;
+	border-radius: 8px;
+	background: rgba(212, 181, 160, 0.12);
+	text-align: center;
+}
+
+.frame-readout span {
+	font-size: 11px;
+	color: #8a5a38;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.frame-readout strong {
+	font-size: 16px;
+	color: #4a2c1a;
+}
+
+.frame-slider-group {
+	display: grid;
+	gap: 8px;
+}
+
+.frame-slider-labels {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	align-items: center;
+}
+
+.frame-slider-labels label,
+.frame-slider-labels span {
+	font-size: 12px;
+	color: #6b4423;
+	font-weight: 600;
+}
+
+.frame-slider {
+	width: 100%;
+	height: 6px;
+	border-radius: 999px;
+	background: linear-gradient(90deg, #d4b5a0 0%, #c9a88c 100%);
+	outline: none;
+	-webkit-appearance: none;
+	appearance: none;
+	cursor: pointer;
+}
+
+.frame-slider::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: linear-gradient(135deg, #6b4423 0%, #4a2c1a 100%);
+	box-shadow: 0 2px 6px rgba(103, 72, 48, 0.2);
+}
+
+.frame-slider::-moz-range-thumb {
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: linear-gradient(135deg, #6b4423 0%, #4a2c1a 100%);
+	border: none;
+	box-shadow: 0 2px 6px rgba(103, 72, 48, 0.2);
+}
+
+.frame-strip-panel {
+	display: grid;
+	gap: 8px;
+	padding: 10px;
+	border-radius: 12px;
+	background: rgba(255, 250, 245, 0.82);
+	border: 1px solid rgba(110, 78, 55, 0.14);
+}
+
+.frame-strip-header {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	font-size: 12px;
+	color: #6b4423;
+	font-weight: 600;
+}
+
+.frame-strip-list {
+	display: grid;
+	grid-auto-flow: column;
+	grid-auto-columns: 120px;
+	gap: 8px;
+	overflow-x: auto;
+	padding-bottom: 4px;
+}
+
+.frame-thumb {
+	display: grid;
+	gap: 5px;
+	padding: 6px;
+	border-radius: 10px;
+	border: 1px solid rgba(110, 78, 55, 0.18);
+	background: rgba(255, 255, 255, 0.9);
+	color: #6b4423;
+	text-align: left;
+	font-size: 11px;
+	font-weight: 600;
+}
+
+.frame-thumb img {
+	width: 100%;
+	height: 68px;
+	object-fit: cover;
+	border-radius: 6px;
+	display: block;
+}
+
+.frame-thumb.active {
+	border-color: #6b4423;
+	box-shadow: 0 0 0 2px rgba(107, 68, 35, 0.22);
+}
+
 .merged-preview-panel {
 	border-top: 1px solid rgba(110, 78, 55, 0.08);
 	background: rgba(212, 181, 160, 0.04);
@@ -659,6 +795,53 @@ button {
 	font-weight: 600;
 }
 
+.keyframe-actions {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto auto auto;
+	gap: 10px;
+	align-items: stretch;
+}
+
+.keyframe-list {
+	display: grid;
+	gap: 8px;
+}
+
+.keyframe-item {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 8px;
+	align-items: center;
+	padding: 8px;
+	border-radius: 8px;
+	background: rgba(212, 181, 160, 0.08);
+}
+
+.keyframe-load,
+.keyframe-delete {
+	padding: 8px 10px;
+	border-radius: 8px;
+	border: 1px solid rgba(110, 78, 55, 0.16);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.keyframe-load {
+	background: rgba(255, 255, 255, 0.65);
+	color: #6b4423;
+	text-align: left;
+}
+
+.keyframe-delete {
+	background: rgba(182, 67, 35, 0.08);
+	color: #9a3d1f;
+}
+
+.keyframe-load:hover,
+.keyframe-delete:hover {
+	filter: brightness(0.98);
+}
+
 .effect-group {
 	display: grid;
 	grid-template-columns: 100px 1fr 50px;
@@ -806,6 +989,22 @@ button {
 	border-radius: 12px;
 	border: 1px dashed rgba(110, 78, 55, 0.12);
 	align-content: flex-start;
+}
+
+.timeline-insert-btn {
+	width: 100%;
+	padding: 10px 12px;
+	border-radius: 10px;
+	border: 1px dashed rgba(110, 78, 55, 0.35);
+	background: rgba(255, 255, 255, 0.65);
+	color: #6b4423;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+}
+
+.timeline-insert-btn:hover {
+	background: rgba(212, 181, 160, 0.18);
 }
 
 .timeline-clip {
@@ -997,6 +1196,16 @@ button {
 
 	.preview-window {
 		min-height: 250px;
+	}
+
+	.frame-toolbar,
+	.keyframe-actions,
+	.frame-slider-group {
+		grid-template-columns: 1fr;
+	}
+
+	.frame-strip-list {
+		grid-auto-columns: 104px;
 	}
 
 	.effect-group {
