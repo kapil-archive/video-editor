@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
-import { fetchFile, toBlobURL } from '@ffmpeg/util'
+import { fetchFile } from '@ffmpeg/util'
 import { Canvas, FabricImage, Rect, Textbox } from 'fabric/es'
 import './VideoEditorPage.css'
 
@@ -19,7 +19,6 @@ const EXPORT_PROFILES = {
   fast: {
     label: 'Fast',
     fps: 24,
-    recorderBitrate: 4_000_000,
     preset: 'ultrafast',
     crf: '31',
     audioBitrate: '96k',
@@ -27,7 +26,6 @@ const EXPORT_PROFILES = {
   balanced: {
     label: 'Balanced',
     fps: 30,
-    recorderBitrate: 7_000_000,
     preset: 'veryfast',
     crf: '27',
     audioBitrate: '128k',
@@ -35,7 +33,6 @@ const EXPORT_PROFILES = {
   high: {
     label: 'High',
     fps: 30,
-    recorderBitrate: 10_000_000,
     preset: 'faster',
     crf: '23',
     audioBitrate: '160k',
@@ -72,17 +69,26 @@ const getErrorMessage = (error) => {
   return 'Unknown error'
 }
 
-const getSupportedRecorderMimeType = () => {
-  const candidates = [
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
-    'video/mp4;codecs=h264,aac',
-    'video/mp4',
-  ]
+const FFMPEG_CORE_SOURCES = [
+  {
+    coreURL: 'https://unpkg.com/@ffmpeg/core@0.12.9/dist/esm/ffmpeg-core.js',
+    wasmURL: 'https://unpkg.com/@ffmpeg/core@0.12.9/dist/esm/ffmpeg-core.wasm',
+  },
+  {
+    coreURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.9/dist/esm/ffmpeg-core.js',
+    wasmURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.9/dist/esm/ffmpeg-core.wasm',
+  },
+]
 
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || ''
-}
+const canvasToPngBlob = (canvasEl) => new Promise((resolve, reject) => {
+  canvasEl.toBlob((blob) => {
+    if (blob) {
+      resolve(blob)
+      return
+    }
+    reject(new Error('Unable to serialize overlay frame.'))
+  }, 'image/png')
+})
 
 function VideoEditorPage() {
   const canvasElRef = useRef(null)
@@ -127,11 +133,31 @@ function VideoEditorPage() {
     }
 
     if (!ffmpegRef.current.loaded) {
-      const ffmpegBaseUrl = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
-      await ffmpegRef.current.load({
-        coreURL: await toBlobURL(`${ffmpegBaseUrl}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${ffmpegBaseUrl}/ffmpeg-core.wasm`, 'application/wasm'),
-      })
+      let lastError = null
+
+      for (const source of FFMPEG_CORE_SOURCES) {
+        try {
+          const ffmpeg = new FFmpeg()
+          await ffmpeg.load({
+            coreURL: source.coreURL,
+            wasmURL: source.wasmURL,
+          })
+          ffmpegRef.current = ffmpeg
+          break
+        } catch (error) {
+          lastError = error
+        }
+      }
+
+      if (!ffmpegRef.current?.loaded) {
+        try {
+          const ffmpeg = new FFmpeg()
+          await ffmpeg.load()
+          ffmpegRef.current = ffmpeg
+        } catch (fallbackError) {
+          throw new Error(`Failed to load FFmpeg core. ${getErrorMessage(lastError || fallbackError)}`)
+        }
+      }
     }
 
     return ffmpegRef.current
@@ -619,162 +645,92 @@ function VideoEditorPage() {
       return
     }
 
-    // If there are visible editor layers, export a composited recording so edits are burned in.
+    const sourceDuration = previewVideoRef.current?.duration
     const hasVisualEdits = stageCanvas
       .getObjects()
       .some((object) => object.data?.kind !== 'stage')
 
-    if (hasVisualEdits && sourceVideoUrl) {
-      try {
+    try {
+      setBusyMessage('Loading FFmpeg core (first time can take a while)...')
+      updateExportProgress('Loading encoder', 5)
+      const ffmpeg = await getFfmpeg()
+      const extension = sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'
+      const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
+      const inputName = `input-${Date.now()}.${safeExtension}`
+      const outputName = `export-${Date.now()}.mp4`
+      const tempFrameNames = []
+      const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, timelineDuration)
+      const trimDuration = clamp(
+        sourceVideoClip?.duration ?? timelineDuration,
+        0.5,
+        Number.isFinite(sourceDuration)
+          ? Math.max(0.5, sourceDuration - trimStart)
+          : Math.max(0.5, timelineDuration - trimStart),
+      )
+      const frameRate = selectedExportProfile.fps || 30
+      const frameCount = Math.max(1, Math.ceil(trimDuration * frameRate))
+      const originalPlayhead = playhead
+
+      setBusyMessage('Writing source media into FFmpeg virtual FS...')
+      updateExportProgress('Preparing media', 10)
+      await ffmpeg.writeFile(inputName, await fetchFile(sourceVideo))
+
+      if (hasVisualEdits) {
         setIsPlaying(false)
-        updateExportProgress('Preparing composited export', 5)
+        setBusyMessage('Generating overlay frames for direct MP4 export...')
 
-        const exportVideo = document.createElement('video')
-        exportVideo.src = sourceVideoUrl
-        exportVideo.crossOrigin = 'anonymous'
-        exportVideo.playsInline = true
-        exportVideo.muted = true
-        exportVideo.preload = 'auto'
+        for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+          const timelineTime = trimStart + frameIndex / frameRate
+          applyPlaybackVisibility(timelineTime)
+          setPlayhead(clamp(timelineTime, 0, timelineDuration))
+          stageCanvas.renderAll()
 
-        await new Promise((resolve, reject) => {
-          exportVideo.onloadedmetadata = () => resolve()
-          exportVideo.onerror = () => reject(new Error('Unable to load source video for composited export.'))
-        })
+          const frameBlob = await canvasToPngBlob(stageCanvas.lowerCanvasEl)
+          const frameName = `overlay-${String(frameIndex).padStart(6, '0')}.png`
+          tempFrameNames.push(frameName)
+          await ffmpeg.writeFile(frameName, await fetchFile(frameBlob))
 
-        const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, Number.isFinite(exportVideo.duration) ? exportVideo.duration : timelineDuration)
-        const trimDuration = clamp(
-          sourceVideoClip?.duration ?? timelineDuration,
-          0.5,
-          Number.isFinite(exportVideo.duration)
-            ? Math.max(0.5, exportVideo.duration - trimStart)
-            : Math.max(0.5, timelineDuration - trimStart),
-        )
-
-        const exportCanvas = document.createElement('canvas')
-        exportCanvas.width = STAGE_WIDTH
-        exportCanvas.height = STAGE_HEIGHT
-        const context = exportCanvas.getContext('2d')
-        if (!context) {
-          throw new Error('Unable to initialize export canvas context.')
+          const frameProgress = ((frameIndex + 1) / frameCount) * 45
+          updateExportProgress('Preparing overlays', 10 + frameProgress)
         }
 
-        const stream = exportCanvas.captureStream(selectedExportProfile.fps)
-        const recorderMimeType = getSupportedRecorderMimeType()
-        const recorderOptions = {
-          videoBitsPerSecond: selectedExportProfile.recorderBitrate,
+        setPlayhead(originalPlayhead)
+        applyPlaybackVisibility(originalPlayhead)
+      }
+
+      const ffmpegProgressHandler = ({ progress }) => {
+        if (hasVisualEdits) {
+          updateExportProgress('Encoding MP4', 55 + progress * 45)
+          return
         }
-        if (recorderMimeType) {
-          recorderOptions.mimeType = recorderMimeType
-        }
+        updateExportProgress('Processing export', 10 + progress * 90)
+      }
+      ffmpeg.on('progress', ffmpegProgressHandler)
 
-        const recorder = new MediaRecorder(stream, recorderOptions)
-
-        const chunks = []
-        recorder.ondataavailable = (event) => {
-          if (event.data && event.data.size > 0) {
-            chunks.push(event.data)
-          }
-        }
-
-        const originalPlayhead = playhead
-
-        await new Promise((resolve, reject) => {
-          let raf = 0
-          let startedAt = 0
-
-          const stopAll = () => {
-            if (raf) {
-              cancelAnimationFrame(raf)
-            }
-            exportVideo.pause()
-            if (recorder.state !== 'inactive') {
-              recorder.stop()
-            }
-          }
-
-          recorder.onerror = () => {
-            stopAll()
-            reject(new Error('MediaRecorder failed during composited export.'))
-          }
-
-          recorder.onstop = () => {
-            setPlayhead(originalPlayhead)
-            applyPlaybackVisibility(originalPlayhead)
-            resolve()
-          }
-
-          const renderFrame = (now) => {
-            if (!startedAt) {
-              startedAt = now
-            }
-
-            const elapsed = (now - startedAt) / 1000
-            const timelineTime = trimStart + elapsed
-            const recordPercent = trimDuration > 0
-              ? Math.min(100, (elapsed / trimDuration) * 100)
-              : 100
-
-            applyPlaybackVisibility(timelineTime)
-            setPlayhead(clamp(timelineTime, 0, timelineDuration))
-            updateExportProgress('Recording composition', recordPercent)
-
-            context.clearRect(0, 0, STAGE_WIDTH, STAGE_HEIGHT)
-            context.drawImage(exportVideo, 0, 0, STAGE_WIDTH, STAGE_HEIGHT)
-            context.drawImage(stageCanvas.lowerCanvasEl, 0, 0, STAGE_WIDTH, STAGE_HEIGHT)
-
-            if (elapsed >= trimDuration || exportVideo.ended) {
-              stopAll()
-              return
-            }
-
-            raf = requestAnimationFrame(renderFrame)
-          }
-
-          exportVideo.currentTime = trimStart
-          exportVideo.onseeked = () => {
-            recorder.start()
-            void exportVideo.play().then(() => {
-              setBusyMessage('Exporting composited video with text/overlays...')
-              raf = requestAnimationFrame(renderFrame)
-            }).catch(() => {
-              stopAll()
-              reject(new Error('Playback blocked while exporting. Interact with page and retry export.'))
-            })
-          }
-        })
-
-        const recordedType = recorderMimeType || recorder.mimeType || 'video/webm'
-        const blob = new Blob(chunks, { type: recordedType })
-
-        try {
-          setBusyMessage('Converting composited recording to MP4...')
-          updateExportProgress('Converting to MP4', 0)
-          const ffmpeg = await getFfmpeg()
-          const ffmpegProgressHandler = ({ progress }) => {
-            updateExportProgress('Converting to MP4', progress * 100)
-          }
-          ffmpeg.on('progress', ffmpegProgressHandler)
-          const compositionExt = recordedType.includes('mp4') ? 'mp4' : 'webm'
-          const compositionWebmName = `composition-${Date.now()}.${compositionExt}`
-          const sourceName = `source-${Date.now()}.${sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'}`
-          const outputName = `composited-${Date.now()}.mp4`
-
-          await ffmpeg.writeFile(compositionWebmName, await fetchFile(blob))
-          await ffmpeg.writeFile(sourceName, await fetchFile(sourceVideo))
-
+      try {
+        if (hasVisualEdits) {
+          setBusyMessage('Encoding overlays and source into MP4...')
           await ffmpeg.exec([
+            '-framerate',
+            String(frameRate),
+            '-start_number',
+            '0',
             '-i',
-            compositionWebmName,
+            'overlay-%06d.png',
             '-ss',
             String(trimStart),
             '-t',
             String(trimDuration),
             '-i',
-            sourceName,
+            inputName,
+            '-filter_complex',
+            `[1:v]scale=${STAGE_WIDTH}:${STAGE_HEIGHT}[base];[0:v]format=rgba[ov];[base][ov]overlay=0:0:format=auto[v]`,
             '-map',
-            '0:v:0',
+            '[v]',
             '-map',
-            '1:a:0?',
+            '1:a?',
+            '-r',
+            String(frameRate),
             '-c:v',
             'libx264',
             '-preset',
@@ -790,147 +746,56 @@ function VideoEditorPage() {
             '-shortest',
             outputName,
           ])
-          ffmpeg.off('progress', ffmpegProgressHandler)
-          updateExportProgress('Converting to MP4', 100)
-
-          const data = await ffmpeg.readFile(outputName)
-          const mp4Blob = new Blob([data], { type: 'video/mp4' })
-          const url = URL.createObjectURL(mp4Blob)
-          const anchor = document.createElement('a')
-          anchor.href = url
-          anchor.download = 'canva-like-export.mp4'
-          anchor.click()
-          URL.revokeObjectURL(url)
-
-          await Promise.allSettled([
-            ffmpeg.deleteFile(compositionWebmName),
-            ffmpeg.deleteFile(sourceName),
-            ffmpeg.deleteFile(outputName),
-          ])
-
-          setBusyMessage(`Export finished with overlays and text (${selectedExportProfile.label}).`)
-          updateExportProgress('Completed', 100)
-          setTimeout(() => {
-            clearExportProgress()
-          }, 1200)
-        } catch (conversionError) {
-          const fallbackExtension = recordedType.includes('mp4') ? 'mp4' : 'webm'
-          const fallbackUrl = URL.createObjectURL(blob)
-          const fallbackAnchor = document.createElement('a')
-          fallbackAnchor.href = fallbackUrl
-          fallbackAnchor.download = `canva-like-export.${fallbackExtension}`
-          fallbackAnchor.click()
-          URL.revokeObjectURL(fallbackUrl)
-
-          const details = getErrorMessage(conversionError)
-          setBusyMessage(`Composited export downloaded as ${fallbackExtension.toUpperCase()} (MP4 conversion failed: ${details}).`)
-          updateExportProgress('Completed (fallback)', 100)
-          setTimeout(() => {
-            clearExportProgress()
-          }, 1800)
+        } else {
+          // Fast path: stream copy avoids re-encoding and is usually much faster.
+          setBusyMessage('Fast export: trying stream copy (no re-encode)...')
+          try {
+            await ffmpeg.exec([
+              '-ss',
+              String(trimStart),
+              '-t',
+              String(trimDuration),
+              '-i',
+              inputName,
+              '-map',
+              '0:v:0',
+              '-map',
+              '0:a?',
+              '-c',
+              'copy',
+              '-movflags',
+              '+faststart',
+              outputName,
+            ])
+          } catch {
+            // Fallback: ultrafast encode for files/codecs that cannot be stream-copied.
+            setBusyMessage('Fast copy failed. Falling back to ultrafast encode...')
+            await ffmpeg.exec([
+              '-ss',
+              String(trimStart),
+              '-t',
+              String(trimDuration),
+              '-i',
+              inputName,
+              '-c:v',
+              'libx264',
+              '-preset',
+              selectedExportProfile.preset,
+              '-crf',
+              selectedExportProfile.crf,
+              '-pix_fmt',
+              'yuv420p',
+              '-c:a',
+              'aac',
+              '-b:a',
+              selectedExportProfile.audioBitrate,
+              outputName,
+            ])
+          }
         }
-        return
-      } catch (error) {
-        const details = getErrorMessage(error)
-        setBusyMessage(`Export failed before composition could be finalized: ${details}`)
-        clearExportProgress()
-        return
+      } finally {
+        ffmpeg.off('progress', ffmpegProgressHandler)
       }
-    }
-
-    const sourceDuration = previewVideoRef.current?.duration
-    const sourceClipStart = sourceVideoClip?.start ?? 0
-    const sourceClipDuration = sourceVideoClip?.duration ?? sourceDuration ?? timelineDuration
-    const isFullSourceExport =
-      Number.isFinite(sourceDuration)
-      && sourceClipStart <= 0.05
-      && Math.abs(sourceClipDuration - sourceDuration) <= 0.35
-
-    // Fastest path: if user is exporting the original full clip, skip FFmpeg completely.
-    if (isFullSourceExport) {
-      const url = URL.createObjectURL(sourceVideo)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = sourceVideo.name || 'canva-like-export.mp4'
-      anchor.click()
-      URL.revokeObjectURL(url)
-      setBusyMessage('Fast export completed instantly (no transcoding needed).')
-      updateExportProgress('Completed', 100)
-      setTimeout(() => {
-        clearExportProgress()
-      }, 1000)
-      return
-    }
-
-    try {
-      setBusyMessage('Loading FFmpeg core (first time can take a while)...')
-      updateExportProgress('Loading encoder', 5)
-      const ffmpeg = await getFfmpeg()
-      const ffmpegProgressHandler = ({ progress }) => {
-        updateExportProgress('Processing export', progress * 100)
-      }
-      ffmpeg.on('progress', ffmpegProgressHandler)
-      const extension = sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'
-      const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
-      const inputName = `input-${Date.now()}.${safeExtension}`
-      const outputName = `export-${Date.now()}.mp4`
-      const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, timelineDuration)
-      const trimDuration = clamp(
-        sourceVideoClip?.duration ?? timelineDuration,
-        0.5,
-        Math.max(0.5, timelineDuration - trimStart),
-      )
-
-      setBusyMessage('Writing source media into FFmpeg virtual FS...')
-      updateExportProgress('Preparing media', 10)
-      await ffmpeg.writeFile(inputName, await fetchFile(sourceVideo))
-
-      // Fast path: stream copy avoids re-encoding and is usually much faster.
-      setBusyMessage('Fast export: trying stream copy (no re-encode)...')
-      try {
-        await ffmpeg.exec([
-          '-ss',
-          String(trimStart),
-          '-t',
-          String(trimDuration),
-          '-i',
-          inputName,
-          '-map',
-          '0:v:0',
-          '-map',
-          '0:a?',
-          '-c',
-          'copy',
-          '-movflags',
-          '+faststart',
-          outputName,
-        ])
-      } catch {
-        // Fallback: ultrafast encode for files/codecs that cannot be stream-copied.
-        setBusyMessage('Fast copy failed. Falling back to ultrafast encode...')
-        await ffmpeg.exec([
-          '-ss',
-          String(trimStart),
-          '-t',
-          String(trimDuration),
-          '-i',
-          inputName,
-          '-c:v',
-          'libx264',
-          '-preset',
-          selectedExportProfile.preset,
-          '-crf',
-          selectedExportProfile.crf,
-          '-pix_fmt',
-          'yuv420p',
-          '-c:a',
-          'aac',
-          '-b:a',
-          selectedExportProfile.audioBitrate,
-          outputName,
-        ])
-      }
-      ffmpeg.off('progress', ffmpegProgressHandler)
       updateExportProgress('Processing export', 100)
 
       const data = await ffmpeg.readFile(outputName)
@@ -942,7 +807,11 @@ function VideoEditorPage() {
       anchor.click()
       URL.revokeObjectURL(url)
 
-      await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName)])
+      await Promise.allSettled([
+        ffmpeg.deleteFile(inputName),
+        ffmpeg.deleteFile(outputName),
+        ...tempFrameNames.map((name) => ffmpeg.deleteFile(name)),
+      ])
 
       setBusyMessage(`Export finished (${selectedExportProfile.label}).`) 
       updateExportProgress('Completed', 100)
