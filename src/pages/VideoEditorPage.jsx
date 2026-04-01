@@ -670,6 +670,15 @@ function VideoEditorPage() {
       const frameRate = selectedExportProfile.fps || 30
       const frameCount = Math.max(1, Math.ceil(trimDuration * frameRate))
       const originalPlayhead = playhead
+      const activeObject = stageCanvas.getActiveObject() ?? null
+
+      stageCanvas.getObjects().forEach((object) => {
+        if (typeof object.exitEditing === 'function' && object.isEditing) {
+          object.exitEditing()
+        }
+      })
+      stageCanvas.discardActiveObject()
+      stageCanvas.renderAll()
 
       setBusyMessage('Writing source media into FFmpeg virtual FS...')
       updateExportProgress('Preparing media', 10)
@@ -813,12 +822,22 @@ function VideoEditorPage() {
         ...tempFrameNames.map((name) => ffmpeg.deleteFile(name)),
       ])
 
+      if (activeObject) {
+        stageCanvas.setActiveObject(activeObject)
+        stageCanvas.renderAll()
+      }
+
       setBusyMessage(`Export finished (${selectedExportProfile.label}).`) 
       updateExportProgress('Completed', 100)
       setTimeout(() => {
         clearExportProgress()
       }, 1200)
     } catch (error) {
+      const activeObject = stageCanvas.getObjects().find((object) => object.data?.id === selectedObjectId) ?? null
+      if (activeObject) {
+        stageCanvas.setActiveObject(activeObject)
+        stageCanvas.renderAll()
+      }
       const details = getErrorMessage(error)
       setBusyMessage(`Export failed: ${details}`)
       clearExportProgress()
