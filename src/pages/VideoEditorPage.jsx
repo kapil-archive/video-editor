@@ -15,6 +15,33 @@ const TRACKS = [
   { id: 'overlay', label: 'Overlay' },
 ]
 
+const EXPORT_PROFILES = {
+  fast: {
+    label: 'Fast',
+    fps: 24,
+    recorderBitrate: 4_000_000,
+    preset: 'ultrafast',
+    crf: '31',
+    audioBitrate: '96k',
+  },
+  balanced: {
+    label: 'Balanced',
+    fps: 30,
+    recorderBitrate: 7_000_000,
+    preset: 'veryfast',
+    crf: '27',
+    audioBitrate: '128k',
+  },
+  high: {
+    label: 'High',
+    fps: 30,
+    recorderBitrate: 10_000_000,
+    preset: 'faster',
+    crf: '23',
+    audioBitrate: '160k',
+  },
+}
+
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 
 const id = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 9)}`
@@ -24,6 +51,37 @@ const formatTime = (seconds) => {
   const mins = Math.floor(safe / 60)
   const secs = Math.floor(safe % 60)
   return `${mins}:${String(secs).padStart(2, '0')}`
+}
+
+const getErrorMessage = (error) => {
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error
+  }
+
+  if (error && typeof error === 'object') {
+    const maybeMessage = error.message || error.reason || error.name
+    if (typeof maybeMessage === 'string' && maybeMessage.trim()) {
+      return maybeMessage
+    }
+  }
+
+  return 'Unknown error'
+}
+
+const getSupportedRecorderMimeType = () => {
+  const candidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+    'video/mp4;codecs=h264,aac',
+    'video/mp4',
+  ]
+
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || ''
 }
 
 function VideoEditorPage() {
@@ -54,6 +112,7 @@ function VideoEditorPage() {
   const [sourceVideo, setSourceVideo] = useState(null)
   const [sourceVideoUrl, setSourceVideoUrl] = useState('')
   const [busyMessage, setBusyMessage] = useState('Idle')
+  const [exportProfile, setExportProfile] = useState('balanced')
 
   const selectedClip = useMemo(
     () => clipItems.find((clip) => clip.id === selectedClipId) ?? null,
@@ -69,6 +128,24 @@ function VideoEditorPage() {
     () => clipItems.find((clip) => clip.objectId === 'source-video' && clip.track === 'video') ?? null,
     [clipItems],
   )
+
+  const selectedExportProfile = EXPORT_PROFILES[exportProfile] ?? EXPORT_PROFILES.balanced
+
+  const getFfmpeg = useCallback(async () => {
+    if (!ffmpegRef.current) {
+      ffmpegRef.current = new FFmpeg()
+    }
+
+    if (!ffmpegRef.current.loaded) {
+      const ffmpegBaseUrl = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
+      await ffmpegRef.current.load({
+        coreURL: await toBlobURL(`${ffmpegBaseUrl}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${ffmpegBaseUrl}/ffmpeg-core.wasm`, 'application/wasm'),
+      })
+    }
+
+    return ffmpegRef.current
+  }, [])
 
   const timelineDuration = useMemo(() => {
     const end = clipItems.reduce((max, clip) => Math.max(max, clip.start + clip.duration), 0)
@@ -584,6 +661,209 @@ function VideoEditorPage() {
       return
     }
 
+    const stageCanvas = canvasRef.current
+    if (!stageCanvas) {
+      setBusyMessage('Export failed: stage canvas is not ready.')
+      return
+    }
+
+    // If there are visible editor layers, export a composited recording so edits are burned in.
+    const hasVisualEdits = stageCanvas
+      .getObjects()
+      .some((object) => object.data?.kind !== 'stage')
+
+    if (hasVisualEdits && sourceVideoUrl) {
+      try {
+        setIsPlaying(false)
+
+        const exportVideo = document.createElement('video')
+        exportVideo.src = sourceVideoUrl
+        exportVideo.crossOrigin = 'anonymous'
+        exportVideo.playsInline = true
+        exportVideo.muted = true
+        exportVideo.preload = 'auto'
+
+        await new Promise((resolve, reject) => {
+          exportVideo.onloadedmetadata = () => resolve()
+          exportVideo.onerror = () => reject(new Error('Unable to load source video for composited export.'))
+        })
+
+        const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, Number.isFinite(exportVideo.duration) ? exportVideo.duration : timelineDuration)
+        const trimDuration = clamp(
+          sourceVideoClip?.duration ?? timelineDuration,
+          0.5,
+          Number.isFinite(exportVideo.duration)
+            ? Math.max(0.5, exportVideo.duration - trimStart)
+            : Math.max(0.5, timelineDuration - trimStart),
+        )
+
+        const exportCanvas = document.createElement('canvas')
+        exportCanvas.width = STAGE_WIDTH
+        exportCanvas.height = STAGE_HEIGHT
+        const context = exportCanvas.getContext('2d')
+        if (!context) {
+          throw new Error('Unable to initialize export canvas context.')
+        }
+
+        const stream = exportCanvas.captureStream(selectedExportProfile.fps)
+        const recorderMimeType = getSupportedRecorderMimeType()
+        const recorderOptions = {
+          videoBitsPerSecond: selectedExportProfile.recorderBitrate,
+        }
+        if (recorderMimeType) {
+          recorderOptions.mimeType = recorderMimeType
+        }
+
+        const recorder = new MediaRecorder(stream, recorderOptions)
+
+        const chunks = []
+        recorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0) {
+            chunks.push(event.data)
+          }
+        }
+
+        const originalPlayhead = playhead
+
+        await new Promise((resolve, reject) => {
+          let raf = 0
+          let startedAt = 0
+
+          const stopAll = () => {
+            if (raf) {
+              cancelAnimationFrame(raf)
+            }
+            exportVideo.pause()
+            if (recorder.state !== 'inactive') {
+              recorder.stop()
+            }
+          }
+
+          recorder.onerror = () => {
+            stopAll()
+            reject(new Error('MediaRecorder failed during composited export.'))
+          }
+
+          recorder.onstop = () => {
+            setPlayhead(originalPlayhead)
+            applyPlaybackVisibility(originalPlayhead)
+            resolve()
+          }
+
+          const renderFrame = (now) => {
+            if (!startedAt) {
+              startedAt = now
+            }
+
+            const elapsed = (now - startedAt) / 1000
+            const timelineTime = trimStart + elapsed
+
+            applyPlaybackVisibility(timelineTime)
+
+            context.clearRect(0, 0, STAGE_WIDTH, STAGE_HEIGHT)
+            context.drawImage(exportVideo, 0, 0, STAGE_WIDTH, STAGE_HEIGHT)
+            context.drawImage(stageCanvas.lowerCanvasEl, 0, 0, STAGE_WIDTH, STAGE_HEIGHT)
+
+            if (elapsed >= trimDuration || exportVideo.ended) {
+              stopAll()
+              return
+            }
+
+            raf = requestAnimationFrame(renderFrame)
+          }
+
+          exportVideo.currentTime = trimStart
+          exportVideo.onseeked = () => {
+            recorder.start()
+            void exportVideo.play().then(() => {
+              setBusyMessage('Exporting composited video with text/overlays...')
+              raf = requestAnimationFrame(renderFrame)
+            }).catch(() => {
+              stopAll()
+              reject(new Error('Playback blocked while exporting. Interact with page and retry export.'))
+            })
+          }
+        })
+
+        const recordedType = recorderMimeType || recorder.mimeType || 'video/webm'
+        const blob = new Blob(chunks, { type: recordedType })
+
+        try {
+          setBusyMessage('Converting composited recording to MP4...')
+          const ffmpeg = await getFfmpeg()
+          const compositionExt = recordedType.includes('mp4') ? 'mp4' : 'webm'
+          const compositionWebmName = `composition-${Date.now()}.${compositionExt}`
+          const sourceName = `source-${Date.now()}.${sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'}`
+          const outputName = `composited-${Date.now()}.mp4`
+
+          await ffmpeg.writeFile(compositionWebmName, await fetchFile(blob))
+          await ffmpeg.writeFile(sourceName, await fetchFile(sourceVideo))
+
+          await ffmpeg.exec([
+            '-i',
+            compositionWebmName,
+            '-ss',
+            String(trimStart),
+            '-t',
+            String(trimDuration),
+            '-i',
+            sourceName,
+            '-map',
+            '0:v:0',
+            '-map',
+            '1:a:0?',
+            '-c:v',
+            'libx264',
+            '-preset',
+            selectedExportProfile.preset,
+            '-crf',
+            selectedExportProfile.crf,
+            '-pix_fmt',
+            'yuv420p',
+            '-c:a',
+            'aac',
+            '-b:a',
+            selectedExportProfile.audioBitrate,
+            '-shortest',
+            outputName,
+          ])
+
+          const data = await ffmpeg.readFile(outputName)
+          const mp4Blob = new Blob([data], { type: 'video/mp4' })
+          const url = URL.createObjectURL(mp4Blob)
+          const anchor = document.createElement('a')
+          anchor.href = url
+          anchor.download = 'canva-like-export.mp4'
+          anchor.click()
+          URL.revokeObjectURL(url)
+
+          await Promise.allSettled([
+            ffmpeg.deleteFile(compositionWebmName),
+            ffmpeg.deleteFile(sourceName),
+            ffmpeg.deleteFile(outputName),
+          ])
+
+          setBusyMessage(`Export finished with overlays and text (${selectedExportProfile.label}).`)
+        } catch (conversionError) {
+          const fallbackExtension = recordedType.includes('mp4') ? 'mp4' : 'webm'
+          const fallbackUrl = URL.createObjectURL(blob)
+          const fallbackAnchor = document.createElement('a')
+          fallbackAnchor.href = fallbackUrl
+          fallbackAnchor.download = `canva-like-export.${fallbackExtension}`
+          fallbackAnchor.click()
+          URL.revokeObjectURL(fallbackUrl)
+
+          const details = getErrorMessage(conversionError)
+          setBusyMessage(`Composited export downloaded as ${fallbackExtension.toUpperCase()} (MP4 conversion failed: ${details}).`)
+        }
+        return
+      } catch (error) {
+        const details = getErrorMessage(error)
+        setBusyMessage(`Export failed before composition could be finalized: ${details}`)
+        return
+      }
+    }
+
     const sourceDuration = previewVideoRef.current?.duration
     const sourceClipStart = sourceVideoClip?.start ?? 0
     const sourceClipDuration = sourceVideoClip?.duration ?? sourceDuration ?? timelineDuration
@@ -606,20 +886,7 @@ function VideoEditorPage() {
 
     try {
       setBusyMessage('Loading FFmpeg core (first time can take a while)...')
-
-      if (!ffmpegRef.current) {
-        ffmpegRef.current = new FFmpeg()
-      }
-
-      if (!ffmpegRef.current.loaded) {
-        const ffmpegBaseUrl = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
-        await ffmpegRef.current.load({
-          coreURL: await toBlobURL(`${ffmpegBaseUrl}/ffmpeg-core.js`, 'text/javascript'),
-          wasmURL: await toBlobURL(`${ffmpegBaseUrl}/ffmpeg-core.wasm`, 'application/wasm'),
-        })
-      }
-
-      const ffmpeg = ffmpegRef.current
+      const ffmpeg = await getFfmpeg()
       const extension = sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'
       const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
       const inputName = `input-${Date.now()}.${safeExtension}`
@@ -667,15 +934,15 @@ function VideoEditorPage() {
           '-c:v',
           'libx264',
           '-preset',
-          'ultrafast',
+          selectedExportProfile.preset,
           '-crf',
-          '29',
+          selectedExportProfile.crf,
           '-pix_fmt',
           'yuv420p',
           '-c:a',
           'aac',
           '-b:a',
-          '128k',
+          selectedExportProfile.audioBitrate,
           outputName,
         ])
       }
@@ -691,9 +958,9 @@ function VideoEditorPage() {
 
       await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName)])
 
-      setBusyMessage('Export finished. Fast mode applied where possible.')
+      setBusyMessage(`Export finished (${selectedExportProfile.label}).`) 
     } catch (error) {
-      const details = error instanceof Error ? error.message : 'Unknown error'
+      const details = getErrorMessage(error)
       setBusyMessage(`Export failed: ${details}`)
     }
   }
@@ -716,6 +983,17 @@ function VideoEditorPage() {
             className="ve-hidden-input"
             onChange={uploadSourceVideo}
           />
+          <label className="ve-export-profile" htmlFor="export-profile-select">Quality
+            <select
+              id="export-profile-select"
+              value={exportProfile}
+              onChange={(event) => setExportProfile(event.target.value)}
+            >
+              <option value="fast">Fast</option>
+              <option value="balanced">Balanced</option>
+              <option value="high">High</option>
+            </select>
+          </label>
           <button type="button" className="ve-link ve-link-primary" onClick={exportWithFfmpeg}>Export</button>
         </div>
       </header>
