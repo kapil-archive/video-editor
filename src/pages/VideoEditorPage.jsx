@@ -677,12 +677,11 @@ function VideoEditorPage() {
 
       if (hasVisualEdits) {
         setIsPlaying(false)
-        setBusyMessage('Generating overlay frames for direct MP4 export...')
+        setBusyMessage('Rendering overlay frames for direct MP4 export...')
 
         for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
           const timelineTime = trimStart + frameIndex / frameRate
           applyPlaybackVisibility(timelineTime)
-          setPlayhead(clamp(timelineTime, 0, timelineDuration))
           stageCanvas.renderAll()
 
           const frameBlob = await canvasToPngBlob(stageCanvas.lowerCanvasEl)
@@ -691,16 +690,17 @@ function VideoEditorPage() {
           await ffmpeg.writeFile(frameName, await fetchFile(frameBlob))
 
           const frameProgress = ((frameIndex + 1) / frameCount) * 45
-          updateExportProgress('Preparing overlays', 10 + frameProgress)
+          updateExportProgress('Rendering overlays', 10 + frameProgress)
         }
 
         setPlayhead(originalPlayhead)
         applyPlaybackVisibility(originalPlayhead)
+        stageCanvas.renderAll()
       }
 
       const ffmpegProgressHandler = ({ progress }) => {
         if (hasVisualEdits) {
-          updateExportProgress('Encoding MP4', 55 + progress * 45)
+          updateExportProgress('Encoding direct MP4', 55 + progress * 45)
           return
         }
         updateExportProgress('Processing export', 10 + progress * 90)
@@ -709,7 +709,7 @@ function VideoEditorPage() {
 
       try {
         if (hasVisualEdits) {
-          setBusyMessage('Encoding overlays and source into MP4...')
+          setBusyMessage('Encoding overlays and source directly to MP4...')
           await ffmpeg.exec([
             '-framerate',
             String(frameRate),
