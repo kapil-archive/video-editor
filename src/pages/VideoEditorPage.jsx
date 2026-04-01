@@ -11,9 +11,153 @@ const PIXELS_PER_SECOND = 50
 
 const TRACKS = [
   { id: 'video', label: 'Video' },
+  { id: 'transition', label: 'Transition' },
   { id: 'text', label: 'Text' },
   { id: 'overlay', label: 'Overlay' },
 ]
+
+const TRANSITION_PRESETS = {
+  dipBlack: {
+    label: 'Dip To Black',
+    mode: 'symmetric',
+    timelineColor: '#111827',
+    ffmpegColor: 'black',
+    previewColor: 'rgba(0, 0, 0, 1)',
+  },
+  dipWhite: {
+    label: 'Dip To White',
+    mode: 'symmetric',
+    timelineColor: '#cbd5e1',
+    ffmpegColor: 'white',
+    previewColor: 'rgba(255, 255, 255, 1)',
+  },
+  dipWarm: {
+    label: 'Dip To Warm',
+    mode: 'symmetric',
+    timelineColor: '#df6d3c',
+    ffmpegColor: '0xDF6D3C',
+    previewColor: 'rgba(223, 109, 60, 1)',
+  },
+  dipCool: {
+    label: 'Dip To Cool',
+    mode: 'symmetric',
+    timelineColor: '#2f6f76',
+    ffmpegColor: '0x2F6F76',
+    previewColor: 'rgba(47, 111, 118, 1)',
+  },
+  fadeIn: {
+    label: 'Fade In From Black',
+    mode: 'fadeIn',
+    timelineColor: '#334155',
+    ffmpegColor: 'black',
+    previewColor: 'rgba(0, 0, 0, 1)',
+  },
+  fadeOut: {
+    label: 'Fade Out To Black',
+    mode: 'fadeOut',
+    timelineColor: '#475569',
+    ffmpegColor: 'black',
+    previewColor: 'rgba(0, 0, 0, 1)',
+  },
+  fadeInWhite: {
+    label: 'Fade In From White',
+    mode: 'fadeIn',
+    timelineColor: '#e2e8f0',
+    ffmpegColor: 'white',
+    previewColor: 'rgba(255, 255, 255, 1)',
+  },
+  fadeOutWhite: {
+    label: 'Fade Out To White',
+    mode: 'fadeOut',
+    timelineColor: '#dbe4ee',
+    ffmpegColor: 'white',
+    previewColor: 'rgba(255, 255, 255, 1)',
+  },
+  flashWhite: {
+    label: 'Flash White',
+    mode: 'symmetric',
+    timelineColor: '#cbd5e1',
+    ffmpegColor: 'white',
+    previewColor: 'rgba(255, 255, 255, 1)',
+  },
+  flashRed: {
+    label: 'Flash Red',
+    mode: 'symmetric',
+    timelineColor: '#ef4444',
+    ffmpegColor: 'red',
+    previewColor: 'rgba(239, 68, 68, 1)',
+  },
+  flashBlue: {
+    label: 'Flash Blue',
+    mode: 'symmetric',
+    timelineColor: '#60a5fa',
+    ffmpegColor: '0x60A5FA',
+    previewColor: 'rgba(96, 165, 250, 1)',
+  },
+  wipeLeft: {
+    label: 'Wipe Left',
+    mode: 'wipeLeft',
+    timelineColor: '#1d4ed8',
+    ffmpegColor: '0x1D4ED8',
+    previewColor: 'rgba(29, 78, 216, 1)',
+  },
+  wipeRight: {
+    label: 'Wipe Right',
+    mode: 'wipeRight',
+    timelineColor: '#0f766e',
+    ffmpegColor: '0x0F766E',
+    previewColor: 'rgba(15, 118, 110, 1)',
+  },
+  wipeUp: {
+    label: 'Wipe Up',
+    mode: 'wipeUp',
+    timelineColor: '#7c3aed',
+    ffmpegColor: '0x7C3AED',
+    previewColor: 'rgba(124, 58, 237, 1)',
+  },
+  wipeDown: {
+    label: 'Wipe Down',
+    mode: 'wipeDown',
+    timelineColor: '#be123c',
+    ffmpegColor: '0xBE123C',
+    previewColor: 'rgba(190, 18, 60, 1)',
+  },
+  slideLeft: {
+    label: 'Slide Left',
+    mode: 'slideLeft',
+    timelineColor: '#0f172a',
+    ffmpegColor: '0x0F172A',
+    previewColor: 'rgba(15, 23, 42, 1)',
+  },
+  slideRight: {
+    label: 'Slide Right',
+    mode: 'slideRight',
+    timelineColor: '#1e293b',
+    ffmpegColor: '0x1E293B',
+    previewColor: 'rgba(30, 41, 59, 1)',
+  },
+  slideUp: {
+    label: 'Slide Up',
+    mode: 'slideUp',
+    timelineColor: '#1d3557',
+    ffmpegColor: '0x1D3557',
+    previewColor: 'rgba(29, 53, 87, 1)',
+  },
+  slideDown: {
+    label: 'Slide Down',
+    mode: 'slideDown',
+    timelineColor: '#7f1d1d',
+    ffmpegColor: '0x7F1D1D',
+    previewColor: 'rgba(127, 29, 29, 1)',
+  },
+  zoomFlash: {
+    label: 'Zoom Flash',
+    mode: 'zoomFlash',
+    timelineColor: '#f8fafc',
+    ffmpegColor: 'white',
+    previewColor: 'rgba(255, 255, 255, 1)',
+  },
+}
 
 const EXPORT_PROFILES = {
   fast: {
@@ -69,6 +213,121 @@ const getErrorMessage = (error) => {
   return 'Unknown error'
 }
 
+const getTransitionOpacityAtTime = (clip, time) => {
+  if (!clip || !Number.isFinite(time) || time < clip.start || time > clip.start + clip.duration) {
+    return 0
+  }
+
+  const progress = clip.duration > 0 ? clamp((time - clip.start) / clip.duration, 0, 1) : 0
+  const preset = TRANSITION_PRESETS[clip.transitionKind] ?? TRANSITION_PRESETS.dipBlack
+
+  switch (preset.mode) {
+    case 'fadeIn':
+      return 1 - progress
+    case 'fadeOut':
+      return progress
+    default:
+      return progress <= 0.5 ? progress * 2 : (1 - progress) * 2
+  }
+}
+
+const getTransitionCoverageAtTime = (clip, time) => {
+  if (!clip || !Number.isFinite(time) || time < clip.start || time > clip.start + clip.duration) {
+    return 0
+  }
+
+  const progress = clip.duration > 0 ? clamp((time - clip.start) / clip.duration, 0, 1) : 0
+  return progress <= 0.5 ? progress * 2 : (1 - progress) * 2
+}
+
+const getTransitionPreviewStyle = (clip, time) => {
+  const preset = TRANSITION_PRESETS[clip.transitionKind] ?? TRANSITION_PRESETS.dipBlack
+  const opacity = getTransitionOpacityAtTime(clip, time)
+  const coverage = getTransitionCoverageAtTime(clip, time)
+  const progress = clip.duration > 0 ? clamp((time - clip.start) / clip.duration, 0, 1) : 0
+  const hiddenInset = `${Math.max(0, (1 - coverage) * 100)}%`
+  const slideForward = progress <= 0.5
+    ? 100 - (progress * 200)
+    : -((progress - 0.5) * 200)
+  const slideReverse = progress <= 0.5
+    ? -100 + (progress * 200)
+    : ((progress - 0.5) * 200)
+  const zoomScale = 0.4 + (coverage * 0.9)
+
+  switch (preset.mode) {
+    case 'wipeLeft':
+      return {
+        opacity: 1,
+        background: preset.previewColor,
+        clipPath: `inset(0 ${hiddenInset} 0 0)`,
+        transform: 'translate3d(0, 0, 0)',
+      }
+    case 'wipeRight':
+      return {
+        opacity: 1,
+        background: preset.previewColor,
+        clipPath: `inset(0 0 0 ${hiddenInset})`,
+        transform: 'translate3d(0, 0, 0)',
+      }
+    case 'wipeUp':
+      return {
+        opacity: 1,
+        background: preset.previewColor,
+        clipPath: `inset(${hiddenInset} 0 0 0)`,
+        transform: 'translate3d(0, 0, 0)',
+      }
+    case 'wipeDown':
+      return {
+        opacity: 1,
+        background: preset.previewColor,
+        clipPath: `inset(0 0 ${hiddenInset} 0)`,
+        transform: 'translate3d(0, 0, 0)',
+      }
+    case 'slideLeft':
+      return {
+        opacity: 1,
+        background: preset.previewColor,
+        clipPath: 'inset(0 0 0 0)',
+        transform: `translate3d(${slideForward}%, 0, 0)`,
+      }
+    case 'slideRight':
+      return {
+        opacity: 1,
+        background: preset.previewColor,
+        clipPath: 'inset(0 0 0 0)',
+        transform: `translate3d(${slideReverse}%, 0, 0)`,
+      }
+    case 'slideUp':
+      return {
+        opacity: 1,
+        background: preset.previewColor,
+        clipPath: 'inset(0 0 0 0)',
+        transform: `translate3d(0, ${slideReverse}%, 0)`,
+      }
+    case 'slideDown':
+      return {
+        opacity: 1,
+        background: preset.previewColor,
+        clipPath: 'inset(0 0 0 0)',
+        transform: `translate3d(0, ${slideForward}%, 0)`,
+      }
+    case 'zoomFlash':
+      return {
+        opacity,
+        background: preset.previewColor,
+        clipPath: 'inset(0 0 0 0)',
+        transform: `scale(${zoomScale})`,
+      }
+    default:
+      return {
+        opacity,
+        background: preset.previewColor,
+        clipPath: 'inset(0 0 0 0)',
+        transform: 'translate3d(0, 0, 0)',
+      }
+  }
+}
+
 const FFMPEG_CORE_SOURCES = [
   {
     coreURL: 'https://unpkg.com/@ffmpeg/core@0.12.9/dist/esm/ffmpeg-core.js',
@@ -122,6 +381,7 @@ function VideoEditorPage() {
   const [busyMessage, setBusyMessage] = useState('Idle')
   const [exportProfile, setExportProfile] = useState('balanced')
   const [exportProgress, setExportProgress] = useState(null)
+  const [transitionPreset, setTransitionPreset] = useState('dipBlack')
 
   const selectedClip = useMemo(
     () => clipItems.find((clip) => clip.id === selectedClipId) ?? null,
@@ -137,6 +397,28 @@ function VideoEditorPage() {
     () => clipItems.find((clip) => clip.objectId === 'source-video' && clip.track === 'video') ?? null,
     [clipItems],
   )
+
+  const transitionClips = useMemo(
+    () => clipItems.filter((clip) => clip.type === 'transition'),
+    [clipItems],
+  )
+
+  const activeTransitionVisual = useMemo(() => {
+    return transitionClips.reduce((activeTransition, clip) => {
+      const previewStyle = getTransitionPreviewStyle(clip, playhead)
+      if (previewStyle.opacity <= 0) {
+        return activeTransition
+      }
+
+      if (!activeTransition || previewStyle.opacity > activeTransition.opacity) {
+        return {
+          ...previewStyle,
+        }
+      }
+
+      return activeTransition
+    }, null)
+  }, [playhead, transitionClips])
 
   const selectedExportProfile = EXPORT_PROFILES[exportProfile] ?? EXPORT_PROFILES.balanced
 
@@ -550,6 +832,25 @@ function VideoEditorPage() {
     }
   }
 
+  const addTransitionClip = () => {
+    const preset = TRANSITION_PRESETS[transitionPreset] ?? TRANSITION_PRESETS.dipBlack
+
+    setClipItems((prev) => [
+      ...prev,
+      {
+        id: id('clip'),
+        objectId: null,
+        label: preset.label,
+        track: 'transition',
+        start: clamp(playhead, 0, Math.max(0, timelineDuration - 1.2)),
+        duration: 1.2,
+        color: preset.timelineColor,
+        type: 'transition',
+        transitionKind: transitionPreset,
+      },
+    ])
+  }
+
   const seekTimeline = (event) => {
     const timeline = timelineRef.current
     if (!timeline) {
@@ -662,6 +963,7 @@ function VideoEditorPage() {
     const hasVisualEdits = stageCanvas
       .getObjects()
       .some((object) => object.data?.kind !== 'stage')
+    const hasTransitions = transitionClips.length > 0
     const sourceExtension = sourceVideo.name.split('.').pop()?.toLowerCase() || ''
     const isSourceMp4 = sourceVideo.type === 'video/mp4' || sourceExtension === 'mp4'
     const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, timelineDuration)
@@ -677,7 +979,7 @@ function VideoEditorPage() {
       && trimStart <= 0.05
       && Math.abs(trimDuration - sourceDuration) <= 0.35
 
-    if (!hasVisualEdits && isSourceMp4 && isFullLengthExport) {
+    if (!hasVisualEdits && !hasTransitions && isSourceMp4 && isFullLengthExport) {
       const sourceUrl = URL.createObjectURL(sourceVideo)
       const anchor = document.createElement('a')
       anchor.href = sourceUrl
@@ -721,6 +1023,24 @@ function VideoEditorPage() {
       await ffmpeg.writeFile(inputName, await fetchFile(sourceVideo))
 
       const overlaySegments = []
+      const normalizedTransitionClips = transitionClips
+        .map((clip) => {
+          const boundedStart = clamp(clip.start, trimStart, trimStart + trimDuration)
+          const boundedEnd = clamp(clip.start + clip.duration, trimStart, trimStart + trimDuration)
+          const duration = boundedEnd - boundedStart
+
+          if (duration <= 0.001) {
+            return null
+          }
+
+          return {
+            ...clip,
+            start: boundedStart - trimStart,
+            duration,
+            end: boundedEnd - trimStart,
+          }
+        })
+        .filter(Boolean)
 
       if (hasVisualEdits) {
         setIsPlaying(false)
@@ -815,7 +1135,7 @@ function VideoEditorPage() {
       }, [])
 
       const ffmpegProgressHandler = ({ progress }) => {
-        if (mergedOverlaySegments.length > 0) {
+        if (mergedOverlaySegments.length > 0 || normalizedTransitionClips.length > 0) {
           updateExportProgress('Encoding direct MP4', 40 + progress * 60)
           return
         }
@@ -824,7 +1144,7 @@ function VideoEditorPage() {
       ffmpeg.on('progress', ffmpegProgressHandler)
 
       try {
-        if (mergedOverlaySegments.length > 0) {
+        if (mergedOverlaySegments.length > 0 || normalizedTransitionClips.length > 0) {
           setBusyMessage('Encoding overlays and source directly to MP4...')
           const filterParts = [`[0:v]scale=${outputWidth}:${outputHeight}[v0]`]
           let previousStream = 'v0'
@@ -859,6 +1179,90 @@ function VideoEditorPage() {
               '-i',
               segment.name,
             )
+          })
+
+          normalizedTransitionClips.forEach((clip) => {
+            const preset = TRANSITION_PRESETS[clip.transitionKind] ?? TRANSITION_PRESETS.dipBlack
+            ffmpegArgs.push(
+              '-f',
+              'lavfi',
+              '-t',
+              String(clip.duration),
+              '-i',
+              `color=c=${preset.ffmpegColor}:s=${outputWidth}x${outputHeight}:r=${frameRate}`,
+            )
+          })
+
+          normalizedTransitionClips.forEach((clip, index) => {
+            const inputIndex = mergedOverlaySegments.length + index + 1
+            const outputStream = `v${mergedOverlaySegments.length + index + 1}`
+            const fadeDuration = Math.max(0.01, clip.duration / 2)
+            const safeEnd = Math.max(clip.start, clip.end - 0.001)
+            const preset = TRANSITION_PRESETS[clip.transitionKind] ?? TRANSITION_PRESETS.dipBlack
+
+            if (preset.mode === 'fadeIn') {
+              filterParts.push(
+                `[${inputIndex}:v]format=rgba,fade=t=out:st=0:d=${clip.duration}:alpha=1[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=0:0:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'fadeOut') {
+              filterParts.push(
+                `[${inputIndex}:v]format=rgba,fade=t=in:st=0:d=${clip.duration}:alpha=1[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=0:0:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'wipeLeft') {
+              filterParts.push(
+                `[${inputIndex}:v]crop=w='max(1,in_w*(if(lt(t,${fadeDuration.toFixed(3)}),t/${fadeDuration.toFixed(3)},max(0,(${clip.duration.toFixed(3)}-t)/${fadeDuration.toFixed(3)}))))':h=in_h:x=0:y=0[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=0:0:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'wipeRight') {
+              filterParts.push(
+                `[${inputIndex}:v]crop=w='max(1,in_w*(if(lt(t,${fadeDuration.toFixed(3)}),t/${fadeDuration.toFixed(3)},max(0,(${clip.duration.toFixed(3)}-t)/${fadeDuration.toFixed(3)}))))':h=in_h:x='in_w-out_w':y=0[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=W-w:0:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'wipeUp') {
+              filterParts.push(
+                `[${inputIndex}:v]crop=w=in_w:h='max(1,in_h*(if(lt(t,${fadeDuration.toFixed(3)}),t/${fadeDuration.toFixed(3)},max(0,(${clip.duration.toFixed(3)}-t)/${fadeDuration.toFixed(3)}))))':x=0:y='in_h-out_h'[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=0:H-h:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'wipeDown') {
+              filterParts.push(
+                `[${inputIndex}:v]crop=w=in_w:h='max(1,in_h*(if(lt(t,${fadeDuration.toFixed(3)}),t/${fadeDuration.toFixed(3)},max(0,(${clip.duration.toFixed(3)}-t)/${fadeDuration.toFixed(3)}))))':x=0:y=0[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=0:0:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'slideLeft') {
+              filterParts.push(
+                `[${inputIndex}:v]format=rgba[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=x='if(lt(t,${fadeDuration.toFixed(3)}),W-(t/${fadeDuration.toFixed(3)})*W,-((t-${fadeDuration.toFixed(3)})/${fadeDuration.toFixed(3)})*W)':y=0:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'slideRight') {
+              filterParts.push(
+                `[${inputIndex}:v]format=rgba[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=x='if(lt(t,${fadeDuration.toFixed(3)}),-W+(t/${fadeDuration.toFixed(3)})*W,((t-${fadeDuration.toFixed(3)})/${fadeDuration.toFixed(3)})*W)':y=0:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'slideUp') {
+              filterParts.push(
+                `[${inputIndex}:v]format=rgba[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=x=0:y='if(lt(t,${fadeDuration.toFixed(3)}),-H+(t/${fadeDuration.toFixed(3)})*H,((t-${fadeDuration.toFixed(3)})/${fadeDuration.toFixed(3)})*H)':format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'slideDown') {
+              filterParts.push(
+                `[${inputIndex}:v]format=rgba[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=x=0:y='if(lt(t,${fadeDuration.toFixed(3)}),H-(t/${fadeDuration.toFixed(3)})*H,-((t-${fadeDuration.toFixed(3)})/${fadeDuration.toFixed(3)})*H)':format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else if (preset.mode === 'zoomFlash') {
+              filterParts.push(
+                `[${inputIndex}:v]format=rgba,fade=t=in:st=0:d=${fadeDuration}:alpha=1,fade=t=out:st=${Math.max(0, clip.duration - fadeDuration)}:d=${fadeDuration}:alpha=1,scale=w='iw*(0.4+0.9*(if(lt(t,${fadeDuration.toFixed(3)}),t/${fadeDuration.toFixed(3)},max(0,(${clip.duration.toFixed(3)}-t)/${fadeDuration.toFixed(3)}))))':h='ih*(0.4+0.9*(if(lt(t,${fadeDuration.toFixed(3)}),t/${fadeDuration.toFixed(3)},max(0,(${clip.duration.toFixed(3)}-t)/${fadeDuration.toFixed(3)}))))'[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=(W-w)/2:(H-h)/2:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            } else {
+              filterParts.push(
+                `[${inputIndex}:v]format=rgba,fade=t=in:st=0:d=${fadeDuration}:alpha=1,fade=t=out:st=${Math.max(0, clip.duration - fadeDuration)}:d=${fadeDuration}:alpha=1[tr${index}]`,
+                `[${previousStream}][tr${index}]overlay=0:0:format=auto:enable='between(t,${clip.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              )
+            }
+
+            previousStream = outputStream
           })
 
           ffmpegArgs.push(
@@ -1020,6 +1424,20 @@ function VideoEditorPage() {
               onChange={addImageLayer}
             />
           </div>
+          <div className="ve-transition-controls">
+            <label className="ve-transition-picker" htmlFor="transition-preset-select">Transition
+              <select
+                id="transition-preset-select"
+                value={transitionPreset}
+                onChange={(event) => setTransitionPreset(event.target.value)}
+              >
+                {Object.entries(TRANSITION_PRESETS).map(([presetId, preset]) => (
+                  <option key={presetId} value={presetId}>{preset.label}</option>
+                ))}
+              </select>
+            </label>
+            <button type="button" onClick={addTransitionClip}>Add Transition</button>
+          </div>
 
           <p className="ve-status">{busyMessage}</p>
           {exportProgress ? (
@@ -1089,6 +1507,14 @@ function VideoEditorPage() {
               }}
             />
             <canvas ref={canvasElRef} />
+            <div
+              className="ve-transition-overlay"
+              style={{
+                opacity: activeTransitionVisual?.opacity ?? 0,
+                background: activeTransitionVisual?.background ?? 'rgba(0, 0, 0, 0)',
+                clipPath: activeTransitionVisual?.clipPath ?? 'inset(0 0 0 0)',
+              }}
+            />
           </div>
         </section>
 
@@ -1185,14 +1611,38 @@ function VideoEditorPage() {
                 />
               </label>
 
-              <label>
-                Color
-                <input
-                  type="color"
-                  value={selectedClip.color}
-                  onChange={(event) => updateClip({ color: event.target.value })}
-                />
-              </label>
+              {selectedClip.type === 'transition' ? (
+                <label>
+                  Transition
+                  <select
+                    value={selectedClip.transitionKind || 'dipBlack'}
+                    onChange={(event) => {
+                      const nextKind = event.target.value
+                      const preset = TRANSITION_PRESETS[nextKind] ?? TRANSITION_PRESETS.dipBlack
+                      updateClip({
+                        transitionKind: nextKind,
+                        label: preset.label,
+                        color: preset.timelineColor,
+                      })
+                    }}
+                  >
+                    {Object.entries(TRANSITION_PRESETS).map(([presetId, preset]) => (
+                      <option key={presetId} value={presetId}>{preset.label}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+
+              {selectedClip.type !== 'transition' ? (
+                <label>
+                  Color
+                  <input
+                    type="color"
+                    value={selectedClip.color}
+                    onChange={(event) => updateClip({ color: event.target.value })}
+                  />
+                </label>
+              ) : null}
 
               <button type="button" onClick={removeSelectedClip}>Delete Clip</button>
             </div>
@@ -1241,6 +1691,10 @@ function VideoEditorPage() {
                             canvas.renderAll()
                             setSelectedObjectId(clip.objectId)
                           }
+                        } else {
+                          canvasRef.current?.discardActiveObject()
+                          canvasRef.current?.renderAll()
+                          setSelectedObjectId(null)
                         }
                       }}
                     >

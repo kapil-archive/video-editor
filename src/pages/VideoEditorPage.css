@@ -168,6 +168,37 @@
   text-align: center;
 }
 
+.ve-transition-controls {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ve-transition-picker {
+  border: 1px solid var(--ve-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--ve-title);
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ve-transition-picker select,
+.ve-form-grid select {
+  border: 1px solid var(--ve-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ve-title);
+  padding: 7px 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .ve-status {
   margin: 12px 0;
   border-radius: 12px;
@@ -313,6 +344,14 @@
 
 .ve-preview-video.is-visible {
   opacity: 1;
+}
+
+.ve-transition-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  transform-origin: center center;
 }
 
 .ve-form-grid {
