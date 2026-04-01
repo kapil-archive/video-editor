@@ -80,8 +80,21 @@ const FFMPEG_CORE_SOURCES = [
   },
 ]
 
-const canvasToPngBlob = (canvasEl) => new Promise((resolve, reject) => {
-  canvasEl.toBlob((blob) => {
+const canvasToPngBlob = (canvasEl, width = canvasEl.width, height = canvasEl.height) => new Promise((resolve, reject) => {
+  const exportCanvas = document.createElement('canvas')
+  exportCanvas.width = width
+  exportCanvas.height = height
+
+  const context = exportCanvas.getContext('2d')
+  if (!context) {
+    reject(new Error('Unable to initialize export canvas.'))
+    return
+  }
+
+  context.clearRect(0, 0, width, height)
+  context.drawImage(canvasEl, 0, 0, width, height)
+
+  exportCanvas.toBlob((blob) => {
     if (blob) {
       resolve(blob)
       return
@@ -649,6 +662,35 @@ function VideoEditorPage() {
     const hasVisualEdits = stageCanvas
       .getObjects()
       .some((object) => object.data?.kind !== 'stage')
+    const sourceExtension = sourceVideo.name.split('.').pop()?.toLowerCase() || ''
+    const isSourceMp4 = sourceVideo.type === 'video/mp4' || sourceExtension === 'mp4'
+    const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, timelineDuration)
+    const trimDuration = clamp(
+      sourceVideoClip?.duration ?? timelineDuration,
+      0.5,
+      Number.isFinite(sourceDuration)
+        ? Math.max(0.5, sourceDuration - trimStart)
+        : Math.max(0.5, timelineDuration - trimStart),
+    )
+    const isFullLengthExport =
+      Number.isFinite(sourceDuration)
+      && trimStart <= 0.05
+      && Math.abs(trimDuration - sourceDuration) <= 0.35
+
+    if (!hasVisualEdits && isSourceMp4 && isFullLengthExport) {
+      const sourceUrl = URL.createObjectURL(sourceVideo)
+      const anchor = document.createElement('a')
+      anchor.href = sourceUrl
+      anchor.download = 'canva-like-export.mp4'
+      anchor.click()
+      URL.revokeObjectURL(sourceUrl)
+      setBusyMessage('Export finished instantly using original MP4 source.')
+      updateExportProgress('Completed', 100)
+      setTimeout(() => {
+        clearExportProgress()
+      }, 800)
+      return
+    }
 
     try {
       setBusyMessage('Loading FFmpeg core (first time can take a while)...')
@@ -659,16 +701,10 @@ function VideoEditorPage() {
       const inputName = `input-${Date.now()}.${safeExtension}`
       const outputName = `export-${Date.now()}.mp4`
       const tempFrameNames = []
-      const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, timelineDuration)
-      const trimDuration = clamp(
-        sourceVideoClip?.duration ?? timelineDuration,
-        0.5,
-        Number.isFinite(sourceDuration)
-          ? Math.max(0.5, sourceDuration - trimStart)
-          : Math.max(0.5, timelineDuration - trimStart),
-      )
+      const renderedOverlayCache = new Map()
       const frameRate = selectedExportProfile.fps || 30
-      const frameCount = Math.max(1, Math.ceil(trimDuration * frameRate))
+      const outputWidth = STAGE_WIDTH
+      const outputHeight = STAGE_HEIGHT
       const originalPlayhead = playhead
       const activeObject = stageCanvas.getActiveObject() ?? null
 
@@ -684,22 +720,76 @@ function VideoEditorPage() {
       updateExportProgress('Preparing media', 10)
       await ffmpeg.writeFile(inputName, await fetchFile(sourceVideo))
 
+      const overlaySegments = []
+
       if (hasVisualEdits) {
         setIsPlaying(false)
-        setBusyMessage('Rendering overlay frames for direct MP4 export...')
+        setBusyMessage('Rendering overlay segments for direct MP4 export...')
 
-        for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
-          const timelineTime = trimStart + frameIndex / frameRate
+        const trimEnd = trimStart + trimDuration
+        const changePoints = new Set([trimStart, trimEnd])
+
+        clipItems.forEach((clip) => {
+          if (clip.objectId === 'source-video') {
+            return
+          }
+
+          const clipStart = clamp(clip.start, trimStart, trimEnd)
+          const clipEnd = clamp(clip.start + clip.duration, trimStart, trimEnd)
+          changePoints.add(clipStart)
+          changePoints.add(clipEnd)
+        })
+
+        const sortedPoints = [...changePoints].sort((left, right) => left - right)
+
+        for (let segmentIndex = 0; segmentIndex < sortedPoints.length - 1; segmentIndex += 1) {
+          const segmentStart = sortedPoints[segmentIndex]
+          const segmentEnd = sortedPoints[segmentIndex + 1]
+          const segmentDuration = segmentEnd - segmentStart
+
+          if (segmentDuration <= 0.001) {
+            continue
+          }
+
+          const timelineTime = segmentStart + (segmentDuration / 2)
           applyPlaybackVisibility(timelineTime)
           stageCanvas.renderAll()
 
-          const frameBlob = await canvasToPngBlob(stageCanvas.lowerCanvasEl)
-          const frameName = `overlay-${String(frameIndex).padStart(6, '0')}.png`
-          tempFrameNames.push(frameName)
-          await ffmpeg.writeFile(frameName, await fetchFile(frameBlob))
+          const visibleOverlayObjects = stageCanvas
+            .getObjects()
+            .filter((object) => object.data?.kind !== 'stage' && object.visible !== false)
 
-          const frameProgress = ((frameIndex + 1) / frameCount) * 45
-          updateExportProgress('Rendering overlays', 10 + frameProgress)
+          const hasVisibleOverlay = visibleOverlayObjects.length > 0
+
+          if (!hasVisibleOverlay) {
+            const segmentProgress = ((segmentIndex + 1) / Math.max(1, sortedPoints.length - 1)) * 30
+            updateExportProgress('Rendering overlays', 10 + segmentProgress)
+            continue
+          }
+
+          const overlaySignature = visibleOverlayObjects
+            .map((object) => object.data?.id || object.type)
+            .join('|')
+
+          let frameName = renderedOverlayCache.get(overlaySignature)
+
+          if (!frameName) {
+            const frameBlob = await canvasToPngBlob(stageCanvas.lowerCanvasEl, outputWidth, outputHeight)
+            frameName = `overlay-segment-${String(tempFrameNames.length).padStart(4, '0')}.png`
+            tempFrameNames.push(frameName)
+            await ffmpeg.writeFile(frameName, await fetchFile(frameBlob))
+            renderedOverlayCache.set(overlaySignature, frameName)
+          }
+
+          overlaySegments.push({
+            name: frameName,
+            start: segmentStart - trimStart,
+            end: segmentEnd - trimStart,
+            duration: segmentDuration,
+          })
+
+          const segmentProgress = ((segmentIndex + 1) / Math.max(1, sortedPoints.length - 1)) * 30
+          updateExportProgress('Rendering overlays', 10 + segmentProgress)
         }
 
         setPlayhead(originalPlayhead)
@@ -708,8 +798,8 @@ function VideoEditorPage() {
       }
 
       const ffmpegProgressHandler = ({ progress }) => {
-        if (hasVisualEdits) {
-          updateExportProgress('Encoding direct MP4', 55 + progress * 45)
+        if (overlaySegments.length > 0) {
+          updateExportProgress('Encoding direct MP4', 40 + progress * 60)
           return
         }
         updateExportProgress('Processing export', 10 + progress * 90)
@@ -717,27 +807,50 @@ function VideoEditorPage() {
       ffmpeg.on('progress', ffmpegProgressHandler)
 
       try {
-        if (hasVisualEdits) {
+        if (overlaySegments.length > 0) {
           setBusyMessage('Encoding overlays and source directly to MP4...')
-          await ffmpeg.exec([
-            '-framerate',
-            String(frameRate),
-            '-start_number',
-            '0',
-            '-i',
-            'overlay-%06d.png',
+          const filterParts = [`[0:v]scale=${outputWidth}:${outputHeight}[v0]`]
+          let previousStream = 'v0'
+
+          overlaySegments.forEach((segment, index) => {
+            const inputIndex = index + 1
+            const outputStream = `v${index + 1}`
+            const safeEnd = Math.max(segment.start, segment.end - 0.001)
+
+            filterParts.push(
+              `[${inputIndex}:v]format=rgba[ov${index}]`,
+              `[${previousStream}][ov${index}]overlay=0:0:format=auto:enable='between(t,${segment.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+            )
+            previousStream = outputStream
+          })
+
+          const ffmpegArgs = [
             '-ss',
             String(trimStart),
             '-t',
             String(trimDuration),
             '-i',
             inputName,
+          ]
+
+          overlaySegments.forEach((segment) => {
+            ffmpegArgs.push(
+              '-loop',
+              '1',
+              '-t',
+              String(segment.duration),
+              '-i',
+              segment.name,
+            )
+          })
+
+          ffmpegArgs.push(
             '-filter_complex',
-            `[1:v]scale=${STAGE_WIDTH}:${STAGE_HEIGHT}[base];[0:v]format=rgba[ov];[base][ov]overlay=0:0:format=auto[v]`,
+            filterParts.join(';'),
             '-map',
-            '[v]',
+            `[${previousStream}]`,
             '-map',
-            '1:a?',
+            '0:a?',
             '-r',
             String(frameRate),
             '-c:v',
@@ -754,7 +867,9 @@ function VideoEditorPage() {
             selectedExportProfile.audioBitrate,
             '-shortest',
             outputName,
-          ])
+          )
+
+          await ffmpeg.exec(ffmpegArgs)
         } else {
           // Fast path: stream copy avoids re-encoding and is usually much faster.
           setBusyMessage('Fast export: trying stream copy (no re-encode)...')
