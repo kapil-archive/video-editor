@@ -92,18 +92,7 @@ function VideoEditorPage() {
   const previewVideoRef = useRef(null)
   const sourceVideoUrlRef = useRef(null)
 
-  const [clipItems, setClipItems] = useState([
-    {
-      id: id('clip'),
-      objectId: 'source-video',
-      label: 'Main footage',
-      track: 'video',
-      start: 0,
-      duration: 18,
-      color: '#2f455c',
-      type: 'video',
-    },
-  ])
+  const [clipItems, setClipItems] = useState([])
   const [layers, setLayers] = useState([])
   const [selectedClipId, setSelectedClipId] = useState(null)
   const [selectedObjectId, setSelectedObjectId] = useState(null)
@@ -226,57 +215,6 @@ function VideoEditorPage() {
     })
     stage.set('data', { kind: 'stage' })
     canvas.add(stage)
-
-    const headline = new Textbox('Build your scene', {
-      left: STAGE_WIDTH * 0.08,
-      top: STAGE_HEIGHT * 0.1,
-      width: STAGE_WIDTH * 0.7,
-      fill: '#f3f5f7',
-      fontFamily: 'Avenir Next',
-      fontWeight: 700,
-      fontSize: 72,
-      lineHeight: 1,
-      shadow: 'rgba(0,0,0,0.3) 0 8px 24px',
-    })
-    headline.set('data', { id: id('obj'), name: 'Headline text' })
-    canvas.add(headline)
-
-    const subtitle = new Textbox('Timeline + Fabric + FFmpeg export pipeline', {
-      left: STAGE_WIDTH * 0.08,
-      top: STAGE_HEIGHT * 0.26,
-      width: STAGE_WIDTH * 0.64,
-      fill: '#c5d0dd',
-      fontFamily: 'Avenir Next',
-      fontWeight: 500,
-      fontSize: 30,
-      lineHeight: 1.2,
-    })
-    subtitle.set('data', { id: id('obj'), name: 'Subtitle text' })
-    canvas.add(subtitle)
-
-    const headlineClip = {
-      id: id('clip'),
-      objectId: headline.data.id,
-      label: 'Headline',
-      track: 'text',
-      start: 0,
-      duration: 14,
-      color: '#43807d',
-      type: 'text',
-    }
-
-    const subtitleClip = {
-      id: id('clip'),
-      objectId: subtitle.data.id,
-      label: 'Subtitle',
-      track: 'text',
-      start: 1,
-      duration: 14,
-      color: '#4f8b88',
-      type: 'text',
-    }
-
-    setClipItems((prev) => [...prev, headlineClip, subtitleClip])
 
     const selectActive = () => {
       const active = canvas.getActiveObject()
@@ -968,11 +906,7 @@ function VideoEditorPage() {
   return (
     <div className="ve-page">
       <header className="ve-topbar">
-        <div>
-          <p className="ve-eyebrow">Canva-like video architecture</p>
-          <h1>Fabric scene graph + custom timeline + FFmpeg.wasm export</h1>
-        </div>
-
+     
         <div className="ve-topbar-actions">
           <Link to="/" className="ve-link ve-link-muted">Home</Link>
           <label className="ve-link ve-link-muted" htmlFor="video-source-input">Upload Source Video</label>
