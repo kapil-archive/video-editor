@@ -797,8 +797,25 @@ function VideoEditorPage() {
         stageCanvas.renderAll()
       }
 
+      const mergedOverlaySegments = overlaySegments.reduce((segments, segment) => {
+        const previousSegment = segments[segments.length - 1]
+
+        if (
+          previousSegment
+          && previousSegment.name === segment.name
+          && Math.abs(previousSegment.end - segment.start) <= 0.001
+        ) {
+          previousSegment.end = segment.end
+          previousSegment.duration = previousSegment.end - previousSegment.start
+          return segments
+        }
+
+        segments.push({ ...segment })
+        return segments
+      }, [])
+
       const ffmpegProgressHandler = ({ progress }) => {
-        if (overlaySegments.length > 0) {
+        if (mergedOverlaySegments.length > 0) {
           updateExportProgress('Encoding direct MP4', 40 + progress * 60)
           return
         }
@@ -807,12 +824,12 @@ function VideoEditorPage() {
       ffmpeg.on('progress', ffmpegProgressHandler)
 
       try {
-        if (overlaySegments.length > 0) {
+        if (mergedOverlaySegments.length > 0) {
           setBusyMessage('Encoding overlays and source directly to MP4...')
           const filterParts = [`[0:v]scale=${outputWidth}:${outputHeight}[v0]`]
           let previousStream = 'v0'
 
-          overlaySegments.forEach((segment, index) => {
+          mergedOverlaySegments.forEach((segment, index) => {
             const inputIndex = index + 1
             const outputStream = `v${index + 1}`
             const safeEnd = Math.max(segment.start, segment.end - 0.001)
@@ -833,7 +850,7 @@ function VideoEditorPage() {
             inputName,
           ]
 
-          overlaySegments.forEach((segment) => {
+          mergedOverlaySegments.forEach((segment) => {
             ffmpegArgs.push(
               '-loop',
               '1',
