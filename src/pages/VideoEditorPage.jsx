@@ -102,6 +102,7 @@ function VideoEditorPage() {
   const [sourceVideoUrl, setSourceVideoUrl] = useState('')
   const [busyMessage, setBusyMessage] = useState('Idle')
   const [exportProfile, setExportProfile] = useState('balanced')
+  const [exportProgress, setExportProgress] = useState(null)
 
   const selectedClip = useMemo(
     () => clipItems.find((clip) => clip.id === selectedClipId) ?? null,
@@ -134,6 +135,17 @@ function VideoEditorPage() {
     }
 
     return ffmpegRef.current
+  }, [])
+
+  const updateExportProgress = useCallback((label, percent) => {
+    setExportProgress({
+      label,
+      percent: clamp(Math.round(percent), 0, 100),
+    })
+  }, [])
+
+  const clearExportProgress = useCallback(() => {
+    setExportProgress(null)
   }, [])
 
   const timelineDuration = useMemo(() => {
@@ -599,6 +611,8 @@ function VideoEditorPage() {
       return
     }
 
+    updateExportProgress('Preparing export', 0)
+
     const stageCanvas = canvasRef.current
     if (!stageCanvas) {
       setBusyMessage('Export failed: stage canvas is not ready.')
@@ -613,6 +627,7 @@ function VideoEditorPage() {
     if (hasVisualEdits && sourceVideoUrl) {
       try {
         setIsPlaying(false)
+        updateExportProgress('Preparing composited export', 5)
 
         const exportVideo = document.createElement('video')
         exportVideo.src = sourceVideoUrl
@@ -695,8 +710,13 @@ function VideoEditorPage() {
 
             const elapsed = (now - startedAt) / 1000
             const timelineTime = trimStart + elapsed
+            const recordPercent = trimDuration > 0
+              ? Math.min(100, (elapsed / trimDuration) * 100)
+              : 100
 
             applyPlaybackVisibility(timelineTime)
+            setPlayhead(clamp(timelineTime, 0, timelineDuration))
+            updateExportProgress('Recording composition', recordPercent)
 
             context.clearRect(0, 0, STAGE_WIDTH, STAGE_HEIGHT)
             context.drawImage(exportVideo, 0, 0, STAGE_WIDTH, STAGE_HEIGHT)
@@ -728,7 +748,12 @@ function VideoEditorPage() {
 
         try {
           setBusyMessage('Converting composited recording to MP4...')
+          updateExportProgress('Converting to MP4', 0)
           const ffmpeg = await getFfmpeg()
+          const ffmpegProgressHandler = ({ progress }) => {
+            updateExportProgress('Converting to MP4', progress * 100)
+          }
+          ffmpeg.on('progress', ffmpegProgressHandler)
           const compositionExt = recordedType.includes('mp4') ? 'mp4' : 'webm'
           const compositionWebmName = `composition-${Date.now()}.${compositionExt}`
           const sourceName = `source-${Date.now()}.${sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'}`
@@ -765,6 +790,8 @@ function VideoEditorPage() {
             '-shortest',
             outputName,
           ])
+          ffmpeg.off('progress', ffmpegProgressHandler)
+          updateExportProgress('Converting to MP4', 100)
 
           const data = await ffmpeg.readFile(outputName)
           const mp4Blob = new Blob([data], { type: 'video/mp4' })
@@ -782,6 +809,10 @@ function VideoEditorPage() {
           ])
 
           setBusyMessage(`Export finished with overlays and text (${selectedExportProfile.label}).`)
+          updateExportProgress('Completed', 100)
+          setTimeout(() => {
+            clearExportProgress()
+          }, 1200)
         } catch (conversionError) {
           const fallbackExtension = recordedType.includes('mp4') ? 'mp4' : 'webm'
           const fallbackUrl = URL.createObjectURL(blob)
@@ -793,11 +824,16 @@ function VideoEditorPage() {
 
           const details = getErrorMessage(conversionError)
           setBusyMessage(`Composited export downloaded as ${fallbackExtension.toUpperCase()} (MP4 conversion failed: ${details}).`)
+          updateExportProgress('Completed (fallback)', 100)
+          setTimeout(() => {
+            clearExportProgress()
+          }, 1800)
         }
         return
       } catch (error) {
         const details = getErrorMessage(error)
         setBusyMessage(`Export failed before composition could be finalized: ${details}`)
+        clearExportProgress()
         return
       }
     }
@@ -819,12 +855,21 @@ function VideoEditorPage() {
       anchor.click()
       URL.revokeObjectURL(url)
       setBusyMessage('Fast export completed instantly (no transcoding needed).')
+      updateExportProgress('Completed', 100)
+      setTimeout(() => {
+        clearExportProgress()
+      }, 1000)
       return
     }
 
     try {
       setBusyMessage('Loading FFmpeg core (first time can take a while)...')
+      updateExportProgress('Loading encoder', 5)
       const ffmpeg = await getFfmpeg()
+      const ffmpegProgressHandler = ({ progress }) => {
+        updateExportProgress('Processing export', progress * 100)
+      }
+      ffmpeg.on('progress', ffmpegProgressHandler)
       const extension = sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'
       const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
       const inputName = `input-${Date.now()}.${safeExtension}`
@@ -837,6 +882,7 @@ function VideoEditorPage() {
       )
 
       setBusyMessage('Writing source media into FFmpeg virtual FS...')
+      updateExportProgress('Preparing media', 10)
       await ffmpeg.writeFile(inputName, await fetchFile(sourceVideo))
 
       // Fast path: stream copy avoids re-encoding and is usually much faster.
@@ -884,6 +930,8 @@ function VideoEditorPage() {
           outputName,
         ])
       }
+      ffmpeg.off('progress', ffmpegProgressHandler)
+      updateExportProgress('Processing export', 100)
 
       const data = await ffmpeg.readFile(outputName)
       const blob = new Blob([data], { type: 'video/mp4' })
@@ -897,9 +945,14 @@ function VideoEditorPage() {
       await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName)])
 
       setBusyMessage(`Export finished (${selectedExportProfile.label}).`) 
+      updateExportProgress('Completed', 100)
+      setTimeout(() => {
+        clearExportProgress()
+      }, 1200)
     } catch (error) {
       const details = getErrorMessage(error)
       setBusyMessage(`Export failed: ${details}`)
+      clearExportProgress()
     }
   }
 
@@ -949,6 +1002,15 @@ function VideoEditorPage() {
           </div>
 
           <p className="ve-status">{busyMessage}</p>
+          {exportProgress ? (
+            <div className="ve-progress-wrap" role="status" aria-live="polite">
+              <div className="ve-progress-meta">
+                <span>{exportProgress.label}</span>
+                <strong>{exportProgress.percent}%</strong>
+              </div>
+              <progress className="ve-progress" max={100} value={exportProgress.percent} />
+            </div>
+          ) : null}
 
           <h3>Layers</h3>
           <div className="ve-layers">
