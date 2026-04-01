@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
-import { fetchFile } from '@ffmpeg/util'
+import { fetchFile, toBlobURL } from '@ffmpeg/util'
 import { Canvas, FabricImage, Rect, Textbox } from 'fabric/es'
 import './VideoEditorPage.css'
 
@@ -63,6 +63,11 @@ function VideoEditorPage() {
   const selectedLayer = useMemo(
     () => layers.find((layer) => layer.id === selectedObjectId) ?? null,
     [layers, selectedObjectId],
+  )
+
+  const sourceVideoClip = useMemo(
+    () => clipItems.find((clip) => clip.objectId === 'source-video' && clip.track === 'video') ?? null,
+    [clipItems],
   )
 
   const timelineDuration = useMemo(() => {
@@ -579,6 +584,26 @@ function VideoEditorPage() {
       return
     }
 
+    const sourceDuration = previewVideoRef.current?.duration
+    const sourceClipStart = sourceVideoClip?.start ?? 0
+    const sourceClipDuration = sourceVideoClip?.duration ?? sourceDuration ?? timelineDuration
+    const isFullSourceExport =
+      Number.isFinite(sourceDuration)
+      && sourceClipStart <= 0.05
+      && Math.abs(sourceClipDuration - sourceDuration) <= 0.35
+
+    // Fastest path: if user is exporting the original full clip, skip FFmpeg completely.
+    if (isFullSourceExport) {
+      const url = URL.createObjectURL(sourceVideo)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = sourceVideo.name || 'canva-like-export.mp4'
+      anchor.click()
+      URL.revokeObjectURL(url)
+      setBusyMessage('Fast export completed instantly (no transcoding needed).')
+      return
+    }
+
     try {
       setBusyMessage('Loading FFmpeg core (first time can take a while)...')
 
@@ -587,33 +612,73 @@ function VideoEditorPage() {
       }
 
       if (!ffmpegRef.current.loaded) {
+        const ffmpegBaseUrl = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
         await ffmpegRef.current.load({
-          coreURL: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js',
-          wasmURL: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm',
+          coreURL: await toBlobURL(`${ffmpegBaseUrl}/ffmpeg-core.js`, 'text/javascript'),
+          wasmURL: await toBlobURL(`${ffmpegBaseUrl}/ffmpeg-core.wasm`, 'application/wasm'),
         })
       }
 
       const ffmpeg = ffmpegRef.current
-      const inputName = `input-${Date.now()}.mp4`
+      const extension = sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'
+      const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
+      const inputName = `input-${Date.now()}.${safeExtension}`
       const outputName = `export-${Date.now()}.mp4`
+      const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, timelineDuration)
+      const trimDuration = clamp(
+        sourceVideoClip?.duration ?? timelineDuration,
+        0.5,
+        Math.max(0.5, timelineDuration - trimStart),
+      )
 
       setBusyMessage('Writing source media into FFmpeg virtual FS...')
       await ffmpeg.writeFile(inputName, await fetchFile(sourceVideo))
 
-      setBusyMessage('Rendering export clip...')
-      await ffmpeg.exec([
-        '-i',
-        inputName,
-        '-t',
-        String(Math.max(1, Math.floor(timelineDuration))),
-        '-c:v',
-        'libx264',
-        '-preset',
-        'veryfast',
-        '-pix_fmt',
-        'yuv420p',
-        outputName,
-      ])
+      // Fast path: stream copy avoids re-encoding and is usually much faster.
+      setBusyMessage('Fast export: trying stream copy (no re-encode)...')
+      try {
+        await ffmpeg.exec([
+          '-ss',
+          String(trimStart),
+          '-t',
+          String(trimDuration),
+          '-i',
+          inputName,
+          '-map',
+          '0:v:0',
+          '-map',
+          '0:a?',
+          '-c',
+          'copy',
+          '-movflags',
+          '+faststart',
+          outputName,
+        ])
+      } catch {
+        // Fallback: ultrafast encode for files/codecs that cannot be stream-copied.
+        setBusyMessage('Fast copy failed. Falling back to ultrafast encode...')
+        await ffmpeg.exec([
+          '-ss',
+          String(trimStart),
+          '-t',
+          String(trimDuration),
+          '-i',
+          inputName,
+          '-c:v',
+          'libx264',
+          '-preset',
+          'ultrafast',
+          '-crf',
+          '29',
+          '-pix_fmt',
+          'yuv420p',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '128k',
+          outputName,
+        ])
+      }
 
       const data = await ffmpeg.readFile(outputName)
       const blob = new Blob([data], { type: 'video/mp4' })
@@ -624,9 +689,12 @@ function VideoEditorPage() {
       anchor.click()
       URL.revokeObjectURL(url)
 
-      setBusyMessage('Export finished. File downloaded.')
-    } catch {
-      setBusyMessage('Export failed. Check browser memory limits and source media format.')
+      await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName)])
+
+      setBusyMessage('Export finished. Fast mode applied where possible.')
+    } catch (error) {
+      const details = error instanceof Error ? error.message : 'Unknown error'
+      setBusyMessage(`Export failed: ${details}`)
     }
   }
 
