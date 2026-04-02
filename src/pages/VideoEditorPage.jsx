@@ -381,6 +381,7 @@ function VideoEditorPage() {
   const [exportProfile, setExportProfile] = useState('balanced')
   const [exportProgress, setExportProgress] = useState(null)
   const [transitionPreset, setTransitionPreset] = useState('dipBlack')
+  const [draggingVideoClipId, setDraggingVideoClipId] = useState(null)
 
   useEffect(() => {
     sourceVideosRef.current = sourceVideos
@@ -890,6 +891,51 @@ function VideoEditorPage() {
     const cursorX = event.clientX - bounds.left + timeline.scrollLeft
     setPlayhead(clamp(cursorX / PIXELS_PER_SECOND, 0, timelineDuration))
   }
+
+  const reorderVideoClipsAtPosition = useCallback((droppedClipId, dropSeconds) => {
+    setClipItems((prev) => {
+      const videoClips = prev
+        .filter((clip) => clip.track === 'video')
+        .sort((left, right) => left.start - right.start)
+
+      const dragged = videoClips.find((clip) => clip.id === droppedClipId)
+      if (!dragged) {
+        return prev
+      }
+
+      const remaining = videoClips.filter((clip) => clip.id !== droppedClipId)
+      const insertIndex = remaining.findIndex((clip) => {
+        const center = clip.start + (clip.duration / 2)
+        return dropSeconds < center
+      })
+
+      const ordered = [...remaining]
+      if (insertIndex === -1) {
+        ordered.push(dragged)
+      } else {
+        ordered.splice(insertIndex, 0, dragged)
+      }
+
+      const baseStart = Math.min(...videoClips.map((clip) => clip.start), 0)
+      let cursor = baseStart
+      const nextVideoById = new Map()
+
+      ordered.forEach((clip) => {
+        nextVideoById.set(clip.id, {
+          ...clip,
+          start: cursor,
+        })
+        cursor += clip.duration
+      })
+
+      return prev.map((clip) => {
+        if (clip.track !== 'video') {
+          return clip
+        }
+        return nextVideoById.get(clip.id) ?? clip
+      })
+    })
+  }, [])
 
   const updateClip = (changes) => {
     if (!selectedClip) {
@@ -1800,7 +1846,32 @@ function VideoEditorPage() {
           {TRACKS.map((track) => (
             <div className="ve-track" key={track.id}>
               <div className="ve-track-label">{track.label}</div>
-              <div className="ve-track-lane" style={{ width: `${timelineWidth}px` }}>
+              <div
+                className="ve-track-lane"
+                style={{ width: `${timelineWidth}px` }}
+                onDragOver={(event) => {
+                  if (track.id !== 'video' || !draggingVideoClipId) {
+                    return
+                  }
+                  event.preventDefault()
+                }}
+                onDrop={(event) => {
+                  if (track.id !== 'video' || !draggingVideoClipId) {
+                    return
+                  }
+                  event.preventDefault()
+                  const laneRect = event.currentTarget.getBoundingClientRect()
+                  const scrollOffset = timelineRef.current?.scrollLeft ?? 0
+                  const dropSeconds = clamp(
+                    (event.clientX - laneRect.left + scrollOffset) / PIXELS_PER_SECOND,
+                    0,
+                    timelineDuration,
+                  )
+                  reorderVideoClipsAtPosition(draggingVideoClipId, dropSeconds)
+                  setDraggingVideoClipId(null)
+                  setBusyMessage('Video clip order updated.')
+                }}
+              >
                 {clipItems
                   .filter((clip) => clip.track === track.id)
                   .map((clip) => (
@@ -1812,6 +1883,18 @@ function VideoEditorPage() {
                         left: `${clip.start * PIXELS_PER_SECOND}px`,
                         width: `${Math.max(44, clip.duration * PIXELS_PER_SECOND)}px`,
                         background: clip.color,
+                      }}
+                      draggable={clip.track === 'video'}
+                      onDragStart={(event) => {
+                        if (clip.track !== 'video') {
+                          return
+                        }
+                        event.dataTransfer.effectAllowed = 'move'
+                        event.dataTransfer.setData('text/plain', clip.id)
+                        setDraggingVideoClipId(clip.id)
+                      }}
+                      onDragEnd={() => {
+                        setDraggingVideoClipId(null)
                       }}
                       onClick={(event) => {
                         event.stopPropagation()
