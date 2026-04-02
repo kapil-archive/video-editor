@@ -16,6 +16,8 @@ const TRACKS = [
   { id: 'overlay', label: 'Overlay' },
 ]
 
+const DRAGGABLE_CLIP_TRACKS = ['video', 'text', 'overlay']
+
 const TRANSITION_PRESETS = {
   dipBlack: {
     label: 'Dip To Black',
@@ -381,7 +383,7 @@ function VideoEditorPage() {
   const [exportProfile, setExportProfile] = useState('balanced')
   const [exportProgress, setExportProgress] = useState(null)
   const [transitionPreset, setTransitionPreset] = useState('dipBlack')
-  const [draggingVideoClipId, setDraggingVideoClipId] = useState(null)
+  const [draggingTimelineClip, setDraggingTimelineClip] = useState(null)
 
   useEffect(() => {
     sourceVideosRef.current = sourceVideos
@@ -892,18 +894,18 @@ function VideoEditorPage() {
     setPlayhead(clamp(cursorX / PIXELS_PER_SECOND, 0, timelineDuration))
   }
 
-  const reorderVideoClipsAtPosition = useCallback((droppedClipId, dropSeconds) => {
+  const reorderTrackClipsAtPosition = useCallback((trackId, droppedClipId, dropSeconds) => {
     setClipItems((prev) => {
-      const videoClips = prev
-        .filter((clip) => clip.track === 'video')
+      const trackClips = prev
+        .filter((clip) => clip.track === trackId)
         .sort((left, right) => left.start - right.start)
 
-      const dragged = videoClips.find((clip) => clip.id === droppedClipId)
+      const dragged = trackClips.find((clip) => clip.id === droppedClipId)
       if (!dragged) {
         return prev
       }
 
-      const remaining = videoClips.filter((clip) => clip.id !== droppedClipId)
+      const remaining = trackClips.filter((clip) => clip.id !== droppedClipId)
       const insertIndex = remaining.findIndex((clip) => {
         const center = clip.start + (clip.duration / 2)
         return dropSeconds < center
@@ -916,12 +918,12 @@ function VideoEditorPage() {
         ordered.splice(insertIndex, 0, dragged)
       }
 
-      const baseStart = Math.min(...videoClips.map((clip) => clip.start), 0)
+      const baseStart = Math.min(...trackClips.map((clip) => clip.start), 0)
       let cursor = baseStart
-      const nextVideoById = new Map()
+      const nextTrackById = new Map()
 
       ordered.forEach((clip) => {
-        nextVideoById.set(clip.id, {
+        nextTrackById.set(clip.id, {
           ...clip,
           start: cursor,
         })
@@ -929,10 +931,10 @@ function VideoEditorPage() {
       })
 
       return prev.map((clip) => {
-        if (clip.track !== 'video') {
+        if (clip.track !== trackId) {
           return clip
         }
-        return nextVideoById.get(clip.id) ?? clip
+        return nextTrackById.get(clip.id) ?? clip
       })
     })
   }, [])
@@ -1850,13 +1852,21 @@ function VideoEditorPage() {
                 className="ve-track-lane"
                 style={{ width: `${timelineWidth}px` }}
                 onDragOver={(event) => {
-                  if (track.id !== 'video' || !draggingVideoClipId) {
+                  const canDrop = DRAGGABLE_CLIP_TRACKS.includes(track.id)
+                    && draggingTimelineClip
+                    && draggingTimelineClip.track === track.id
+
+                  if (!canDrop) {
                     return
                   }
                   event.preventDefault()
                 }}
                 onDrop={(event) => {
-                  if (track.id !== 'video' || !draggingVideoClipId) {
+                  const canDrop = DRAGGABLE_CLIP_TRACKS.includes(track.id)
+                    && draggingTimelineClip
+                    && draggingTimelineClip.track === track.id
+
+                  if (!canDrop) {
                     return
                   }
                   event.preventDefault()
@@ -1867,9 +1877,9 @@ function VideoEditorPage() {
                     0,
                     timelineDuration,
                   )
-                  reorderVideoClipsAtPosition(draggingVideoClipId, dropSeconds)
-                  setDraggingVideoClipId(null)
-                  setBusyMessage('Video clip order updated.')
+                  reorderTrackClipsAtPosition(track.id, draggingTimelineClip.id, dropSeconds)
+                  setDraggingTimelineClip(null)
+                  setBusyMessage(`${track.label} clip order updated.`)
                 }}
               >
                 {clipItems
@@ -1884,17 +1894,17 @@ function VideoEditorPage() {
                         width: `${Math.max(44, clip.duration * PIXELS_PER_SECOND)}px`,
                         background: clip.color,
                       }}
-                      draggable={clip.track === 'video'}
+                      draggable={DRAGGABLE_CLIP_TRACKS.includes(clip.track)}
                       onDragStart={(event) => {
-                        if (clip.track !== 'video') {
+                        if (!DRAGGABLE_CLIP_TRACKS.includes(clip.track)) {
                           return
                         }
                         event.dataTransfer.effectAllowed = 'move'
                         event.dataTransfer.setData('text/plain', clip.id)
-                        setDraggingVideoClipId(clip.id)
+                        setDraggingTimelineClip({ id: clip.id, track: clip.track })
                       }}
                       onDragEnd={() => {
-                        setDraggingVideoClipId(null)
+                        setDraggingTimelineClip(null)
                       }}
                       onClick={(event) => {
                         event.stopPropagation()
