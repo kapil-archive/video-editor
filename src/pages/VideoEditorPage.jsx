@@ -368,7 +368,7 @@ function VideoEditorPage() {
   const canvasRef = useRef(null)
   const ffmpegRef = useRef(null)
   const previewVideoRef = useRef(null)
-  const sourceVideoUrlRef = useRef(null)
+  const sourceVideosRef = useRef([])
 
   const [clipItems, setClipItems] = useState([])
   const [layers, setLayers] = useState([])
@@ -376,12 +376,15 @@ function VideoEditorPage() {
   const [selectedObjectId, setSelectedObjectId] = useState(null)
   const [playhead, setPlayhead] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [sourceVideo, setSourceVideo] = useState(null)
-  const [sourceVideoUrl, setSourceVideoUrl] = useState('')
+  const [sourceVideos, setSourceVideos] = useState([])
   const [busyMessage, setBusyMessage] = useState('Idle')
   const [exportProfile, setExportProfile] = useState('balanced')
   const [exportProgress, setExportProgress] = useState(null)
   const [transitionPreset, setTransitionPreset] = useState('dipBlack')
+
+  useEffect(() => {
+    sourceVideosRef.current = sourceVideos
+  }, [sourceVideos])
 
   const selectedClip = useMemo(
     () => clipItems.find((clip) => clip.id === selectedClipId) ?? null,
@@ -393,10 +396,20 @@ function VideoEditorPage() {
     [layers, selectedObjectId],
   )
 
-  const sourceVideoClip = useMemo(
-    () => clipItems.find((clip) => clip.objectId === 'source-video' && clip.track === 'video') ?? null,
+  const sourceVideoClips = useMemo(
+    () => clipItems.filter((clip) => clip.track === 'video' && clip.sourceId),
     [clipItems],
   )
+
+  const activeSourceVideoClip = useMemo(() => {
+    return sourceVideoClips
+      .filter((clip) => playhead >= clip.start && playhead <= clip.start + clip.duration)
+      .sort((left, right) => left.start - right.start)[0] ?? null
+  }, [playhead, sourceVideoClips])
+
+  const activeSourceVideo = useMemo(() => {
+    return sourceVideos.find((item) => item.id === activeSourceVideoClip?.sourceId) ?? null
+  }, [sourceVideos, activeSourceVideoClip])
 
   const transitionClips = useMemo(
     () => clipItems.filter((clip) => clip.type === 'transition'),
@@ -564,9 +577,9 @@ function VideoEditorPage() {
     syncLayersFromCanvas()
 
     return () => {
-      if (sourceVideoUrlRef.current) {
-        URL.revokeObjectURL(sourceVideoUrlRef.current)
-      }
+      sourceVideosRef.current.forEach((item) => {
+        URL.revokeObjectURL(item.url)
+      })
 
       canvas.dispose()
       canvasRef.current = null
@@ -611,7 +624,7 @@ function VideoEditorPage() {
       return
     }
 
-    if (isPlaying) {
+    if (isPlaying && activeSourceVideo?.url) {
       void previewVideo.play().catch(() => {
         setBusyMessage('Video autoplay blocked. Press play again after interacting with the page.')
       })
@@ -619,78 +632,94 @@ function VideoEditorPage() {
     }
 
     previewVideo.pause()
-  }, [isPlaying])
+  }, [isPlaying, activeSourceVideo])
 
   useEffect(() => {
     const previewVideo = previewVideoRef.current
-    if (!previewVideo || isPlaying) {
+    if (!previewVideo || isPlaying || !activeSourceVideoClip) {
       return
     }
 
-    const bounded = clamp(playhead, 0, Number.isFinite(previewVideo.duration) ? previewVideo.duration : playhead)
+    const localTime = playhead - activeSourceVideoClip.start
+    const bounded = clamp(localTime, 0, Number.isFinite(previewVideo.duration) ? previewVideo.duration : localTime)
     if (Math.abs(previewVideo.currentTime - bounded) > 0.04) {
       previewVideo.currentTime = bounded
     }
-  }, [playhead, isPlaying])
+  }, [playhead, isPlaying, activeSourceVideoClip])
 
   const uploadSourceVideo = async (event) => {
-    const file = event.target.files?.[0] ?? null
-    if (!file) {
+    const files = Array.from(event.target.files ?? [])
+    if (!files.length) {
       return
     }
 
-    setBusyMessage('Preparing source video layer...')
+    setBusyMessage(`Preparing ${files.length} source video layer(s)...`)
     setIsPlaying(false)
-    setSourceVideo(file)
+    const loadedSources = []
 
-    const sourceUrl = URL.createObjectURL(file)
-    const probeVideo = document.createElement('video')
-    probeVideo.src = sourceUrl
-    probeVideo.playsInline = true
-    probeVideo.muted = true
-    probeVideo.preload = 'metadata'
-    probeVideo.load()
+    for (const file of files) {
+      const sourceUrl = URL.createObjectURL(file)
+      const probeVideo = document.createElement('video')
+      probeVideo.src = sourceUrl
+      probeVideo.playsInline = true
+      probeVideo.muted = true
+      probeVideo.preload = 'metadata'
+      probeVideo.load()
 
-    try {
-      await new Promise((resolve, reject) => {
-        probeVideo.onloadedmetadata = () => resolve()
-        probeVideo.onerror = () => reject(new Error('Failed loading uploaded video'))
-      })
+      try {
+        await new Promise((resolve, reject) => {
+          probeVideo.onloadedmetadata = () => resolve()
+          probeVideo.onerror = () => reject(new Error('Failed loading uploaded video'))
+        })
 
-      if (sourceVideoUrlRef.current) {
-        URL.revokeObjectURL(sourceVideoUrlRef.current)
+        loadedSources.push({
+          id: id('source'),
+          file,
+          url: sourceUrl,
+          duration: Number.isFinite(probeVideo.duration) ? Math.max(1, Math.floor(probeVideo.duration)) : 18,
+        })
+      } catch {
+        URL.revokeObjectURL(sourceUrl)
       }
-      sourceVideoUrlRef.current = sourceUrl
-      setSourceVideoUrl(sourceUrl)
+    }
 
-      const clipDuration = Number.isFinite(probeVideo.duration) ? Math.max(1, Math.floor(probeVideo.duration)) : 18
+    if (!loadedSources.length) {
+      setBusyMessage('Unable to load selected video files. Try MP4 (H.264) for browser compatibility.')
+      event.target.value = ''
+      return
+    }
 
-      setClipItems((prev) => {
-        const withoutSourceVideo = prev.filter((clip) => clip.objectId !== 'source-video' && clip.track !== 'video')
-        return [
-          {
-            id: id('clip'),
-            objectId: 'source-video',
-            label: file.name.replace(/\.[^/.]+$/, '') || 'Main footage',
-            track: 'video',
-            start: 0,
-            duration: clipDuration,
-            color: '#2f455c',
-            type: 'video',
-          },
-          ...withoutSourceVideo,
-        ]
+    setSourceVideos((prev) => [...prev, ...loadedSources])
+
+    setClipItems((prev) => {
+      const currentVideoTrackEnd = prev
+        .filter((clip) => clip.track === 'video')
+        .reduce((max, clip) => Math.max(max, clip.start + clip.duration), 0)
+
+      let nextStart = currentVideoTrackEnd
+      const newVideoClips = loadedSources.map((source) => {
+        const nextClip = {
+          id: id('clip'),
+          objectId: `source-video-${source.id}`,
+          sourceId: source.id,
+          label: source.file.name.replace(/\.[^/.]+$/, '') || 'Main footage',
+          track: 'video',
+          start: nextStart,
+          duration: source.duration,
+          color: '#2f455c',
+          type: 'video',
+        }
+        nextStart += source.duration
+        return nextClip
       })
 
-      setSelectedObjectId(null)
-      setPlayhead(0)
-      setBusyMessage(`Video layer added: ${file.name}`)
-    } catch {
-      URL.revokeObjectURL(sourceUrl)
-      setBusyMessage('Unable to load this video. Try MP4 (H.264) for browser compatibility.')
-    } finally {
-      event.target.value = ''
-    }
+      return [...prev, ...newVideoClips]
+    })
+
+    setSelectedObjectId(null)
+    setPlayhead(0)
+    setBusyMessage(`Added ${loadedSources.length} source video layer(s).`)
+    event.target.value = ''
   }
 
   const addTextLayer = () => {
@@ -903,6 +932,22 @@ function VideoEditorPage() {
       return
     }
 
+    if (selectedClip.track === 'video' && selectedClip.sourceId) {
+      const stillReferenced = clipItems.some(
+        (clip) => clip.id !== selectedClip.id && clip.sourceId === selectedClip.sourceId,
+      )
+
+      if (!stillReferenced) {
+        setSourceVideos((prev) => {
+          const target = prev.find((item) => item.id === selectedClip.sourceId)
+          if (target) {
+            URL.revokeObjectURL(target.url)
+          }
+          return prev.filter((item) => item.id !== selectedClip.sourceId)
+        })
+      }
+    }
+
     setClipItems((prev) => prev.filter((clip) => clip.id !== selectedClip.id))
     setSelectedClipId(null)
   }
@@ -946,8 +991,8 @@ function VideoEditorPage() {
   }
 
   const exportWithFfmpeg = async () => {
-    if (!sourceVideo) {
-      setBusyMessage('Upload a source video first to export.')
+    if (!sourceVideoClips.length || !sourceVideos.length) {
+      setBusyMessage('Upload at least one source video first to export.')
       return
     }
 
@@ -959,28 +1004,28 @@ function VideoEditorPage() {
       return
     }
 
-    const sourceDuration = previewVideoRef.current?.duration
+    const orderedVideoClips = [...sourceVideoClips].sort((left, right) => left.start - right.start)
+    const baseTimelineStart = orderedVideoClips[0]?.start ?? 0
+    const baseTimelineEnd = orderedVideoClips.reduce((max, clip) => Math.max(max, clip.start + clip.duration), 0)
+    const baseTimelineDuration = Math.max(0.5, baseTimelineEnd - baseTimelineStart)
     const hasVisualEdits = stageCanvas
       .getObjects()
       .some((object) => object.data?.kind !== 'stage')
     const hasTransitions = transitionClips.length > 0
-    const sourceExtension = sourceVideo.name.split('.').pop()?.toLowerCase() || ''
-    const isSourceMp4 = sourceVideo.type === 'video/mp4' || sourceExtension === 'mp4'
-    const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, timelineDuration)
-    const trimDuration = clamp(
-      sourceVideoClip?.duration ?? timelineDuration,
-      0.5,
-      Number.isFinite(sourceDuration)
-        ? Math.max(0.5, sourceDuration - trimStart)
-        : Math.max(0.5, timelineDuration - trimStart),
-    )
+    const earliestClip = orderedVideoClips[0]
+    const earliestSource = sourceVideos.find((item) => item.id === earliestClip?.sourceId) ?? null
+    const sourceExtension = earliestSource?.file.name.split('.').pop()?.toLowerCase() || ''
+    const isSourceMp4 = earliestSource?.file.type === 'video/mp4' || sourceExtension === 'mp4'
+    const trimStart = 0
+    const trimDuration = baseTimelineDuration
     const isFullLengthExport =
-      Number.isFinite(sourceDuration)
-      && trimStart <= 0.05
-      && Math.abs(trimDuration - sourceDuration) <= 0.35
+      orderedVideoClips.length === 1
+      && Number.isFinite(earliestSource?.duration)
+      && baseTimelineStart <= 0.05
+      && Math.abs(trimDuration - earliestSource.duration) <= 0.35
 
-    if (!hasVisualEdits && !hasTransitions && isSourceMp4 && isFullLengthExport) {
-      const sourceUrl = URL.createObjectURL(sourceVideo)
+    if (!hasVisualEdits && !hasTransitions && isSourceMp4 && isFullLengthExport && earliestSource) {
+      const sourceUrl = URL.createObjectURL(earliestSource.file)
       const anchor = document.createElement('a')
       anchor.href = sourceUrl
       anchor.download = 'canva-like-export.mp4'
@@ -998,9 +1043,7 @@ function VideoEditorPage() {
       setBusyMessage('Loading FFmpeg core (first time can take a while)...')
       updateExportProgress('Loading encoder', 5)
       const ffmpeg = await getFfmpeg()
-      const extension = sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'
-      const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
-      const inputName = `input-${Date.now()}.${safeExtension}`
+      const inputName = `input-${Date.now()}.mp4`
       const outputName = `export-${Date.now()}.mp4`
       const tempFrameNames = []
       const renderedOverlayCache = new Map()
@@ -1020,13 +1063,104 @@ function VideoEditorPage() {
 
       setBusyMessage('Writing source media into FFmpeg virtual FS...')
       updateExportProgress('Preparing media', 10)
-      await ffmpeg.writeFile(inputName, await fetchFile(sourceVideo))
+
+      if (orderedVideoClips.length === 1) {
+        const source = sourceVideos.find((item) => item.id === orderedVideoClips[0].sourceId)
+        if (!source) {
+          throw new Error('Missing source media for video clip.')
+        }
+        await ffmpeg.writeFile(inputName, await fetchFile(source.file))
+      } else {
+        const segmentInputs = []
+        const concatParts = []
+
+        let timelineCursor = baseTimelineStart
+        for (const clip of orderedVideoClips) {
+          const clipStart = Math.max(baseTimelineStart, clip.start)
+          const gapDuration = clipStart - timelineCursor
+
+          if (gapDuration > 0.02) {
+            concatParts.push({ type: 'gap', duration: gapDuration })
+          }
+
+          concatParts.push({ type: 'clip', clip })
+          timelineCursor = Math.max(timelineCursor, clip.start + clip.duration)
+        }
+
+        const stitchedArgs = []
+        concatParts.forEach((part, partIndex) => {
+          if (part.type === 'gap') {
+            stitchedArgs.push(
+              '-f',
+              'lavfi',
+              '-t',
+              String(part.duration),
+              '-i',
+              `color=c=black:s=${outputWidth}x${outputHeight}:r=${frameRate}`,
+            )
+            return
+          }
+
+          const source = sourceVideos.find((item) => item.id === part.clip.sourceId)
+          if (!source) {
+            return
+          }
+
+          const extension = source.file.name.split('.').pop()?.toLowerCase() || 'mp4'
+          const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
+          const clipInputName = `source-${String(partIndex).padStart(3, '0')}.${safeExtension}`
+          segmentInputs.push({ name: clipInputName, sourceFile: source.file })
+          stitchedArgs.push(
+            '-ss',
+            '0',
+            '-t',
+            String(part.clip.duration),
+            '-i',
+            clipInputName,
+          )
+        })
+
+        await Promise.all(
+          segmentInputs.map(async (segment) => {
+            await ffmpeg.writeFile(segment.name, await fetchFile(segment.sourceFile))
+          }),
+        )
+
+        const filterParts = []
+        const concatInputs = []
+        concatParts.forEach((part, index) => {
+          filterParts.push(`[${index}:v]scale=${outputWidth}:${outputHeight},fps=${frameRate},format=yuv420p,setsar=1[v${index}]`)
+          concatInputs.push(`[v${index}]`)
+        })
+        filterParts.push(`${concatInputs.join('')}concat=n=${concatParts.length}:v=1:a=0[vout]`)
+
+        await ffmpeg.exec([
+          ...stitchedArgs,
+          '-filter_complex',
+          filterParts.join(';'),
+          '-map',
+          '[vout]',
+          '-c:v',
+          'libx264',
+          '-preset',
+          'veryfast',
+          '-crf',
+          '24',
+          '-pix_fmt',
+          'yuv420p',
+          inputName,
+        ])
+
+        await Promise.allSettled(segmentInputs.map((segment) => ffmpeg.deleteFile(segment.name)))
+      }
 
       const overlaySegments = []
       const normalizedTransitionClips = transitionClips
         .map((clip) => {
-          const boundedStart = clamp(clip.start, trimStart, trimStart + trimDuration)
-          const boundedEnd = clamp(clip.start + clip.duration, trimStart, trimStart + trimDuration)
+          const relativeStart = clip.start - baseTimelineStart
+          const relativeEnd = (clip.start + clip.duration) - baseTimelineStart
+          const boundedStart = clamp(relativeStart, trimStart, trimStart + trimDuration)
+          const boundedEnd = clamp(relativeEnd, trimStart, trimStart + trimDuration)
           const duration = boundedEnd - boundedStart
 
           if (duration <= 0.001) {
@@ -1035,9 +1169,9 @@ function VideoEditorPage() {
 
           return {
             ...clip,
-            start: boundedStart - trimStart,
+            start: boundedStart,
             duration,
-            end: boundedEnd - trimStart,
+            end: boundedEnd,
           }
         })
         .filter(Boolean)
@@ -1050,12 +1184,12 @@ function VideoEditorPage() {
         const changePoints = new Set([trimStart, trimEnd])
 
         clipItems.forEach((clip) => {
-          if (clip.objectId === 'source-video') {
+          if (clip.track === 'video') {
             return
           }
 
-          const clipStart = clamp(clip.start, trimStart, trimEnd)
-          const clipEnd = clamp(clip.start + clip.duration, trimStart, trimEnd)
+          const clipStart = clamp(clip.start - baseTimelineStart, trimStart, trimEnd)
+          const clipEnd = clamp((clip.start + clip.duration) - baseTimelineStart, trimStart, trimEnd)
           changePoints.add(clipStart)
           changePoints.add(clipEnd)
         })
@@ -1071,7 +1205,7 @@ function VideoEditorPage() {
             continue
           }
 
-          const timelineTime = segmentStart + (segmentDuration / 2)
+          const timelineTime = baseTimelineStart + segmentStart + (segmentDuration / 2)
           applyPlaybackVisibility(timelineTime)
           stageCanvas.renderAll()
 
@@ -1103,8 +1237,8 @@ function VideoEditorPage() {
 
           overlaySegments.push({
             name: frameName,
-            start: segmentStart - trimStart,
-            end: segmentEnd - trimStart,
+            start: segmentStart,
+            end: segmentEnd,
             duration: segmentDuration,
           })
 
@@ -1386,11 +1520,12 @@ function VideoEditorPage() {
      
         <div className="ve-topbar-actions">
           <Link to="/" className="ve-link ve-link-muted">Home</Link>
-          <label className="ve-link ve-link-muted" htmlFor="video-source-input">Upload Source Video</label>
+          <label className="ve-link ve-link-muted" htmlFor="video-source-input">Upload Source Video(s)</label>
           <input
             id="video-source-input"
             type="file"
             accept="video/*"
+            multiple
             className="ve-hidden-input"
             onChange={uploadSourceVideo}
           />
@@ -1496,8 +1631,8 @@ function VideoEditorPage() {
           <div className="ve-stage-wrap">
             <video
               ref={previewVideoRef}
-              className={`ve-preview-video ${sourceVideoUrl ? 'is-visible' : ''}`}
-              src={sourceVideoUrl || undefined}
+              className={`ve-preview-video ${activeSourceVideo?.url ? 'is-visible' : ''}`}
+              src={activeSourceVideo?.url || undefined}
               playsInline
               muted
               preload="auto"
