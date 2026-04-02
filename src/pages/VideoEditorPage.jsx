@@ -386,6 +386,7 @@ function VideoEditorPage() {
   const [transitionPreset, setTransitionPreset] = useState('dipBlack')
   const [draggingTimelineClip, setDraggingTimelineClip] = useState(null)
   const [clipResizeState, setClipResizeState] = useState(null)
+  const [videoFramePreviews, setVideoFramePreviews] = useState({})
 
   useEffect(() => {
     sourceVideosRef.current = sourceVideos
@@ -405,6 +406,127 @@ function VideoEditorPage() {
     () => clipItems.filter((clip) => clip.track === 'video' && clip.sourceId),
     [clipItems],
   )
+
+  const extractVideoFrames = useCallback((videoUrl, frameCount = 8) => new Promise((resolve, reject) => {
+    const probeVideo = document.createElement('video')
+    const exportCanvas = document.createElement('canvas')
+    const context = exportCanvas.getContext('2d')
+
+    if (!context) {
+      reject(new Error('Failed to initialize frame extraction context.'))
+      return
+    }
+
+    const cleanup = () => {
+      probeVideo.src = ''
+      probeVideo.removeAttribute('src')
+    }
+
+    probeVideo.preload = 'metadata'
+    probeVideo.muted = true
+    probeVideo.playsInline = true
+    probeVideo.src = videoUrl
+
+    probeVideo.onloadedmetadata = async () => {
+      try {
+        const duration = Number.isFinite(probeVideo.duration) ? probeVideo.duration : 0
+        const width = Math.max(1, probeVideo.videoWidth || 160)
+        const height = Math.max(1, probeVideo.videoHeight || 90)
+
+        exportCanvas.width = width
+        exportCanvas.height = height
+
+        if (duration <= 0) {
+          cleanup()
+          resolve([])
+          return
+        }
+
+        const captureTimes = Array.from({ length: frameCount }, (_, index) => {
+          const position = (index + 0.5) / frameCount
+          return Math.max(0, Math.min(duration, duration * position))
+        })
+
+        const frames = []
+        for (const time of captureTimes) {
+          await new Promise((next, fail) => {
+            probeVideo.onseeked = () => next()
+            probeVideo.onerror = () => fail(new Error('Failed to seek video frame.'))
+            probeVideo.currentTime = time
+          })
+
+          context.drawImage(probeVideo, 0, 0, width, height)
+          frames.push(exportCanvas.toDataURL('image/jpeg', 0.72))
+        }
+
+        cleanup()
+        resolve(frames)
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
+    }
+
+    probeVideo.onerror = () => {
+      cleanup()
+      reject(new Error('Failed to decode source video frames.'))
+    }
+  }), [])
+
+  useEffect(() => {
+    const sourceIds = new Set(sourceVideos.map((item) => item.id))
+    setVideoFramePreviews((prev) => {
+      const next = Object.fromEntries(
+        Object.entries(prev).filter(([sourceId]) => sourceIds.has(sourceId)),
+      )
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next
+    })
+  }, [sourceVideos])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const missingSources = sourceVideos.filter((item) => !videoFramePreviews[item.id])
+    if (!missingSources.length) {
+      return undefined
+    }
+
+    const generate = async () => {
+      for (const source of missingSources) {
+        try {
+          const frames = await extractVideoFrames(source.url)
+          if (cancelled) {
+            return
+          }
+
+          setVideoFramePreviews((prev) => {
+            if (prev[source.id]) {
+              return prev
+            }
+            return {
+              ...prev,
+              [source.id]: frames,
+            }
+          })
+        } catch {
+          if (cancelled) {
+            return
+          }
+
+          setVideoFramePreviews((prev) => ({
+            ...prev,
+            [source.id]: [],
+          }))
+        }
+      }
+    }
+
+    void generate()
+
+    return () => {
+      cancelled = true
+    }
+  }, [sourceVideos, videoFramePreviews, extractVideoFrames])
 
   const activeSourceVideoClip = useMemo(() => {
     return sourceVideoClips
@@ -1952,7 +2074,7 @@ function VideoEditorPage() {
                   .map((clip) => (
                     <button
                       type="button"
-                      className={`ve-clip ${selectedClipId === clip.id ? 'is-active' : ''} ${RESIZABLE_CLIP_TRACKS.includes(clip.track) ? 'is-resizable' : ''} ${clipResizeState?.clipId === clip.id ? 'is-resizing' : ''}`}
+                      className={`ve-clip ${selectedClipId === clip.id ? 'is-active' : ''} ${clip.track === 'video' ? 'is-video' : ''} ${RESIZABLE_CLIP_TRACKS.includes(clip.track) ? 'is-resizable' : ''} ${clipResizeState?.clipId === clip.id ? 'is-resizing' : ''}`}
                       key={clip.id}
                       style={{
                         left: `${clip.start * PIXELS_PER_SECOND}px`,
@@ -1996,13 +2118,22 @@ function VideoEditorPage() {
                         }
                       }}
                     >
+                      {clip.track === 'video' && videoFramePreviews[clip.sourceId]?.length ? (
+                        <span className="ve-clip-frame-strip" aria-hidden="true">
+                          {videoFramePreviews[clip.sourceId].map((frameSrc, frameIndex) => (
+                            <img key={`${clip.id}-frame-${frameIndex}`} src={frameSrc} alt="" />
+                          ))}
+                        </span>
+                      ) : null}
                       {RESIZABLE_CLIP_TRACKS.includes(clip.track) ? (
                         <span
                           className="ve-clip-handle ve-clip-handle-left"
                           onMouseDown={(event) => startClipResize(event, clip, 'left')}
                         />
                       ) : null}
-                      {clip.label}
+                      {clip.track !== 'video' ? (
+                        <span className="ve-clip-label">{clip.label}</span>
+                      ) : null}
                       {RESIZABLE_CLIP_TRACKS.includes(clip.track) ? (
                         <span
                           className="ve-clip-handle ve-clip-handle-right"
