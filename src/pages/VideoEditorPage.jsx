@@ -17,6 +17,7 @@ const TRACKS = [
 ]
 
 const DRAGGABLE_CLIP_TRACKS = ['video', 'text', 'overlay']
+const RESIZABLE_CLIP_TRACKS = ['text', 'transition', 'overlay']
 
 const TRANSITION_PRESETS = {
   dipBlack: {
@@ -384,6 +385,7 @@ function VideoEditorPage() {
   const [exportProgress, setExportProgress] = useState(null)
   const [transitionPreset, setTransitionPreset] = useState('dipBlack')
   const [draggingTimelineClip, setDraggingTimelineClip] = useState(null)
+  const [clipResizeState, setClipResizeState] = useState(null)
 
   useEffect(() => {
     sourceVideosRef.current = sourceVideos
@@ -938,6 +940,69 @@ function VideoEditorPage() {
       })
     })
   }, [])
+
+  const startClipResize = useCallback((event, clip, edge) => {
+    if (!RESIZABLE_CLIP_TRACKS.includes(clip.track)) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+
+    setSelectedClipId(clip.id)
+    setClipResizeState({
+      clipId: clip.id,
+      edge,
+      initialClientX: event.clientX,
+      initialStart: clip.start,
+      initialDuration: clip.duration,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!clipResizeState) {
+      return undefined
+    }
+
+    const onPointerMove = (event) => {
+      const deltaSeconds = (event.clientX - clipResizeState.initialClientX) / PIXELS_PER_SECOND
+
+      setClipItems((prev) => prev.map((clip) => {
+        if (clip.id !== clipResizeState.clipId) {
+          return clip
+        }
+
+        if (clipResizeState.edge === 'right') {
+          const maxDuration = Math.max(0.5, timelineDuration - clipResizeState.initialStart)
+          return {
+            ...clip,
+            duration: clamp(clipResizeState.initialDuration + deltaSeconds, 0.5, maxDuration),
+          }
+        }
+
+        const clipEnd = clipResizeState.initialStart + clipResizeState.initialDuration
+        const nextStart = clamp(clipResizeState.initialStart + deltaSeconds, 0, clipEnd - 0.5)
+        return {
+          ...clip,
+          start: nextStart,
+          duration: clipEnd - nextStart,
+        }
+      }))
+    }
+
+    const onPointerUp = () => {
+      setClipResizeState(null)
+      setBusyMessage('Clip duration updated.')
+    }
+
+    window.addEventListener('mousemove', onPointerMove)
+    window.addEventListener('mouseup', onPointerUp)
+
+    return () => {
+      window.removeEventListener('mousemove', onPointerMove)
+      window.removeEventListener('mouseup', onPointerUp)
+    }
+  }, [clipResizeState, timelineDuration])
 
   const updateClip = (changes) => {
     if (!selectedClip) {
@@ -1887,7 +1952,7 @@ function VideoEditorPage() {
                   .map((clip) => (
                     <button
                       type="button"
-                      className={`ve-clip ${selectedClipId === clip.id ? 'is-active' : ''}`}
+                      className={`ve-clip ${selectedClipId === clip.id ? 'is-active' : ''} ${RESIZABLE_CLIP_TRACKS.includes(clip.track) ? 'is-resizable' : ''} ${clipResizeState?.clipId === clip.id ? 'is-resizing' : ''}`}
                       key={clip.id}
                       style={{
                         left: `${clip.start * PIXELS_PER_SECOND}px`,
@@ -1896,6 +1961,11 @@ function VideoEditorPage() {
                       }}
                       draggable={DRAGGABLE_CLIP_TRACKS.includes(clip.track)}
                       onDragStart={(event) => {
+                        if (clipResizeState?.clipId === clip.id) {
+                          event.preventDefault()
+                          return
+                        }
+
                         if (!DRAGGABLE_CLIP_TRACKS.includes(clip.track)) {
                           return
                         }
@@ -1926,7 +1996,19 @@ function VideoEditorPage() {
                         }
                       }}
                     >
+                      {RESIZABLE_CLIP_TRACKS.includes(clip.track) ? (
+                        <span
+                          className="ve-clip-handle ve-clip-handle-left"
+                          onMouseDown={(event) => startClipResize(event, clip, 'left')}
+                        />
+                      ) : null}
                       {clip.label}
+                      {RESIZABLE_CLIP_TRACKS.includes(clip.track) ? (
+                        <span
+                          className="ve-clip-handle ve-clip-handle-right"
+                          onMouseDown={(event) => startClipResize(event, clip, 'right')}
+                        />
+                      ) : null}
                     </button>
                   ))}
               </div>
