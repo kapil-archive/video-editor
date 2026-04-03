@@ -1459,6 +1459,9 @@ function VideoEditorPage() {
     const earliestSource = sourceVideos.find((item) => item.id === earliestClip?.sourceId) ?? null
     const sourceExtension = earliestSource?.file.name.split('.').pop()?.toLowerCase() || ''
     const isSourceMp4 = earliestSource?.file.type === 'video/mp4' || sourceExtension === 'mp4'
+    const sourceInputOffset = orderedVideoClips.length === 1
+      ? (orderedVideoClips[0]?.sourceOffset || 0)
+      : 0
     const trimStart = 0
     const trimDuration = baseTimelineDuration
     const isFullLengthExport =
@@ -1740,7 +1743,7 @@ function VideoEditorPage() {
 
           const ffmpegArgs = [
             '-ss',
-            String(trimStart),
+            String(sourceInputOffset + trimStart),
             '-t',
             String(trimDuration),
             '-i',
@@ -1874,7 +1877,7 @@ function VideoEditorPage() {
           try {
             await ffmpeg.exec([
               '-ss',
-              String(trimStart),
+              String(sourceInputOffset + trimStart),
               '-t',
               String(trimDuration),
               '-i',
@@ -1894,7 +1897,7 @@ function VideoEditorPage() {
             setBusyMessage('Fast copy failed. Falling back to ultrafast encode...')
             await ffmpeg.exec([
               '-ss',
-              String(trimStart),
+              String(sourceInputOffset + trimStart),
               '-t',
               String(trimDuration),
               '-i',
