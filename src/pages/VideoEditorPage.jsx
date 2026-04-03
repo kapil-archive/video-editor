@@ -1239,10 +1239,7 @@ function VideoEditorPage() {
         }
 
         if (clipResizeState.edge === 'right') {
-          const maxDuration = Math.min(
-            clipResizeState.initialDuration,
-            timelineDuration - clipResizeState.initialStart
-          )
+          const maxDuration = Math.max(0.5, timelineDuration - clipResizeState.initialStart)
           const snappedEnd = snapToCandidates(
             clipResizeState.initialStart + clamp(clipResizeState.initialDuration + deltaSeconds, 0.5, maxDuration),
             snapCandidates,
