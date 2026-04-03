@@ -404,6 +404,7 @@ function VideoEditorPage() {
   const ffmpegRef = useRef(null)
   const previewVideoRef = useRef(null)
   const sourceVideosRef = useRef([])
+  const playheadRef = useRef(0)
 
   const [clipItems, setClipItems] = useState([])
   const [layers, setLayers] = useState([])
@@ -423,6 +424,10 @@ function VideoEditorPage() {
   useEffect(() => {
     sourceVideosRef.current = sourceVideos
   }, [sourceVideos])
+
+  useEffect(() => {
+    playheadRef.current = playhead
+  }, [playhead])
 
   const selectedClip = useMemo(
     () => clipItems.find((clip) => clip.id === selectedClipId) ?? null,
@@ -777,6 +782,25 @@ function VideoEditorPage() {
     return () => cancelAnimationFrame(frame)
   }, [isPlaying, timelineDuration])
 
+  const syncPreviewVideoTime = useCallback((previewVideo, clip, time, threshold = 0.04) => {
+    if (!previewVideo || !clip) {
+      return
+    }
+
+    const clipOffset = clip.sourceOffset || 0
+    const clipDuration = clip.sourceDuration || clip.duration
+    const clipOut = clipOffset + clipDuration
+    const maxPlayable = Number.isFinite(previewVideo.duration)
+      ? Math.min(previewVideo.duration, clipOut)
+      : clipOut
+    const localTime = clipOffset + (time - clip.start)
+    const bounded = clamp(localTime, clipOffset, maxPlayable)
+
+    if (Math.abs(previewVideo.currentTime - bounded) > threshold) {
+      previewVideo.currentTime = bounded
+    }
+  }, [])
+
   useEffect(() => {
     const previewVideo = previewVideoRef.current
     if (!previewVideo) {
@@ -784,32 +808,29 @@ function VideoEditorPage() {
     }
 
     if (isPlaying && activeSourceVideo?.url) {
-      void previewVideo.play().catch(() => {
-        setBusyMessage('Video autoplay blocked. Press play again after interacting with the page.')
-      })
-      return
+      const startPlayback = () => {
+        if (activeSourceVideoClip) {
+          syncPreviewVideoTime(previewVideo, activeSourceVideoClip, playheadRef.current, 0)
+        }
+
+        void previewVideo.play().catch(() => {
+          setBusyMessage('Video autoplay blocked. Press play again after interacting with the page.')
+        })
+      }
+
+      if (previewVideo.readyState >= 1) {
+        startPlayback()
+        return
+      }
+
+      previewVideo.addEventListener('loadedmetadata', startPlayback, { once: true })
+      return () => {
+        previewVideo.removeEventListener('loadedmetadata', startPlayback)
+      }
     }
 
     previewVideo.pause()
-  }, [isPlaying, activeSourceVideo])
-
-  useEffect(() => {
-    const previewVideo = previewVideoRef.current
-    if (!previewVideo || isPlaying || !activeSourceVideoClip) {
-      return
-    }
-
-    const clipOffset = activeSourceVideoClip.sourceOffset || 0
-    const clipDuration = activeSourceVideoClip.sourceDuration || activeSourceVideoClip.duration
-    const localTime = clipOffset + (playhead - activeSourceVideoClip.start)
-    const maxPlayable = Number.isFinite(previewVideo.duration)
-      ? Math.min(previewVideo.duration, clipOffset + clipDuration)
-      : clipOffset + clipDuration
-    const bounded = clamp(localTime, clipOffset, maxPlayable)
-    if (Math.abs(previewVideo.currentTime - bounded) > 0.04) {
-      previewVideo.currentTime = bounded
-    }
-  }, [playhead, isPlaying, activeSourceVideoClip])
+  }, [isPlaying, activeSourceVideo, activeSourceVideoClip, syncPreviewVideoTime])
 
   useEffect(() => {
     const previewVideo = previewVideoRef.current
@@ -817,26 +838,21 @@ function VideoEditorPage() {
       return
     }
 
-    const applyCurrentTime = () => {
-      const clipOffset = activeSourceVideoClip.sourceOffset || 0
-      const clipDuration = activeSourceVideoClip.sourceDuration || activeSourceVideoClip.duration
-      const localTime = clipOffset + (playhead - activeSourceVideoClip.start)
-      const maxPlayable = Number.isFinite(previewVideo.duration)
-        ? Math.min(previewVideo.duration, clipOffset + clipDuration)
-        : clipOffset + clipDuration
-      previewVideo.currentTime = clamp(localTime, clipOffset, maxPlayable)
+    const alignToPlayhead = () => {
+      const threshold = isPlaying ? 0.12 : 0.04
+      syncPreviewVideoTime(previewVideo, activeSourceVideoClip, playhead, threshold)
     }
 
     if (Number.isFinite(previewVideo.duration) && previewVideo.duration > 0) {
-      applyCurrentTime()
+      alignToPlayhead()
       return
     }
 
-    previewVideo.addEventListener('loadedmetadata', applyCurrentTime, { once: true })
+    previewVideo.addEventListener('loadedmetadata', alignToPlayhead, { once: true })
     return () => {
-      previewVideo.removeEventListener('loadedmetadata', applyCurrentTime)
+      previewVideo.removeEventListener('loadedmetadata', alignToPlayhead)
     }
-  }, [activeSourceVideoClip, playhead])
+  }, [playhead, isPlaying, activeSourceVideoClip, syncPreviewVideoTime])
 
   const uploadSourceVideo = async (event) => {
     const files = Array.from(event.target.files ?? [])
