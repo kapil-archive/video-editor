@@ -967,6 +967,8 @@ function VideoEditorPage() {
         duration: 6,
         color: '#4f8b88',
         type: 'text',
+        transitionIn: 'fadeIn',
+        transitionInDuration: 0.5,
       },
     ])
     syncLayersFromCanvas()
@@ -1009,6 +1011,8 @@ function VideoEditorPage() {
         duration: 6,
         color: '#d58b4b',
         type: 'overlay',
+        transitionIn: 'fadeIn',
+        transitionInDuration: 0.5,
       },
     ])
     syncLayersFromCanvas()
@@ -1061,6 +1065,8 @@ function VideoEditorPage() {
           duration: 8,
           color: '#c9693e',
           type: 'image',
+          transitionIn: 'fadeIn',
+          transitionInDuration: 0.5,
         },
       ])
       syncLayersFromCanvas()
@@ -1697,11 +1703,23 @@ function VideoEditorPage() {
             renderedOverlayCache.set(overlaySignature, frameName)
           }
 
+          const segmentClips = clipItems.filter((clip) => {
+            const clipStart = clip.start - baseTimelineStart
+            const clipEnd = clipStart + clip.duration
+            return (
+              clip.track !== 'video'
+              && clip.track !== 'transition'
+              && clipStart < segmentEnd
+              && clipEnd > segmentStart
+            )
+          })
+
           overlaySegments.push({
             name: frameName,
             start: segmentStart,
             end: segmentEnd,
             duration: segmentDuration,
+            clips: segmentClips,
           })
 
           const segmentProgress = ((segmentIndex + 1) / Math.max(1, sortedPoints.length - 1)) * 30
@@ -1723,6 +1741,7 @@ function VideoEditorPage() {
         ) {
           previousSegment.end = segment.end
           previousSegment.duration = previousSegment.end - previousSegment.start
+          previousSegment.clips = segment.clips
           return segments
         }
 
@@ -1749,10 +1768,50 @@ function VideoEditorPage() {
             const inputIndex = index + 1
             const outputStream = `v${index + 1}`
             const safeEnd = Math.max(segment.start, segment.end - 0.001)
+            const transitionSourceClip = (segment.clips || []).find(
+              (clip) => (clip.transitionIn || 'none') !== 'none',
+            )
 
+            let filterStr = `[${inputIndex}:v]format=rgba`
+            let overlayX = '0'
+            let overlayY = '0'
+
+            if (transitionSourceClip) {
+              const transitionType = transitionSourceClip.transitionIn || 'none'
+              const transitionDuration = clamp(
+                Number(transitionSourceClip.transitionInDuration) || 0.5,
+                0.1,
+                2,
+              )
+              const transitionStart = clamp(
+                transitionSourceClip.start - baseTimelineStart,
+                segment.start,
+                safeEnd,
+              )
+              const transitionEnd = transitionStart + transitionDuration
+              const shouldAnimateInSegment = transitionStart >= segment.start && transitionStart <= safeEnd
+
+              if (shouldAnimateInSegment) {
+                filterStr += `,fade=t=in:st=${transitionStart.toFixed(3)}:d=${transitionDuration.toFixed(3)}:alpha=1`
+
+                if (transitionType === 'slideInLeft') {
+                  overlayX = `'if(lt(t,${transitionStart.toFixed(3)}),-W,if(lt(t,${transitionEnd.toFixed(3)}),-W+(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)}*W,0))'`
+                } else if (transitionType === 'slideInRight') {
+                  overlayX = `'if(lt(t,${transitionStart.toFixed(3)}),W,if(lt(t,${transitionEnd.toFixed(3)}),W-(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)}*W,0))'`
+                } else if (transitionType === 'slideInUp') {
+                  overlayY = `'if(lt(t,${transitionStart.toFixed(3)}),H,if(lt(t,${transitionEnd.toFixed(3)}),H-(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)}*H,0))'`
+                } else if (transitionType === 'slideInDown') {
+                  overlayY = `'if(lt(t,${transitionStart.toFixed(3)}),-H,if(lt(t,${transitionEnd.toFixed(3)}),-H+(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)}*H,0))'`
+                } else if (transitionType === 'zoomIn') {
+                  filterStr += `,scale=w='iw*(0.6+0.4*if(lt(t,${transitionStart.toFixed(3)}),0,if(lt(t,${transitionEnd.toFixed(3)}),(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)},1)))':h='ih*(0.6+0.4*if(lt(t,${transitionStart.toFixed(3)}),0,if(lt(t,${transitionEnd.toFixed(3)}),(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)},1)))',pad=${outputWidth}:${outputHeight}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`
+                }
+              }
+            }
+
+            filterStr += `[ov${index}]`
             filterParts.push(
-              `[${inputIndex}:v]format=rgba[ov${index}]`,
-              `[${previousStream}][ov${index}]overlay=0:0:format=auto:enable='between(t,${segment.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              filterStr,
+              `[${previousStream}][ov${index}]overlay=x=${overlayX}:y=${overlayY}:format=auto:enable='between(t,${segment.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
             )
             previousStream = outputStream
           })
@@ -1771,7 +1830,7 @@ function VideoEditorPage() {
               '-loop',
               '1',
               '-t',
-              String(segment.duration),
+              String(trimDuration),
               '-i',
               segment.name,
             )
@@ -2207,6 +2266,37 @@ function VideoEditorPage() {
                   onChange={(event) => updateClip({ duration: Number(event.target.value) })}
                 />
               </label>
+
+              {(selectedClip.type === 'image' || selectedClip.type === 'text' || selectedClip.type === 'overlay') ? (
+                <>
+                  <label>
+                    Transition In
+                    <select
+                      value={selectedClip.transitionIn || 'fadeIn'}
+                      onChange={(event) => updateClip({ transitionIn: event.target.value })}
+                    >
+                      <option value="none">None</option>
+                      <option value="fadeIn">Fade In</option>
+                      <option value="slideInLeft">Slide In Left</option>
+                      <option value="slideInRight">Slide In Right</option>
+                      <option value="slideInUp">Slide In Up</option>
+                      <option value="slideInDown">Slide In Down</option>
+                      <option value="zoomIn">Zoom In</option>
+                    </select>
+                  </label>
+                  <label>
+                    Transition Duration (s)
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={2}
+                      step={0.1}
+                      value={selectedClip.transitionInDuration || 0.5}
+                      onChange={(event) => updateClip({ transitionInDuration: Number(event.target.value) })}
+                    />
+                  </label>
+                </>
+              ) : null}
 
               {selectedClip.type === 'transition' ? (
                 <label>
