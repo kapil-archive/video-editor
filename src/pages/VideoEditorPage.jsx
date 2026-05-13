@@ -16,6 +16,8 @@ const TRACKS = [
   { id: 'overlay', label: 'Overlay' },
 ]
 
+const RESIZABLE_CLIP_TRACKS = ['video', 'text', 'transition', 'overlay']
+
 const TRANSITION_PRESETS = {
   dipBlack: {
     label: 'Dip To Black',
@@ -185,6 +187,34 @@ const EXPORT_PROFILES = {
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 
+const SNAP_THRESHOLD_SECONDS = 0.12
+
+const snapToCandidates = (value, candidates, threshold = SNAP_THRESHOLD_SECONDS) => {
+  if (!Number.isFinite(value) || !Array.isArray(candidates) || !candidates.length) {
+    return value
+  }
+
+  let nearest = value
+  let smallestDistance = Number.POSITIVE_INFINITY
+
+  candidates.forEach((candidate) => {
+    if (!Number.isFinite(candidate)) {
+      return
+    }
+    const distance = Math.abs(candidate - value)
+    if (distance < smallestDistance) {
+      smallestDistance = distance
+      nearest = candidate
+    }
+  })
+
+  if (smallestDistance <= threshold) {
+    return nearest
+  }
+
+  return value
+}
+
 const id = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 9)}`
 
 const formatTime = (seconds) => {
@@ -192,6 +222,11 @@ const formatTime = (seconds) => {
   const mins = Math.floor(safe / 60)
   const secs = Math.floor(safe % 60)
   return `${mins}:${String(secs).padStart(2, '0')}`
+}
+
+const formatPreciseTime = (seconds) => {
+  const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0
+  return safe.toFixed(2)
 }
 
 const getErrorMessage = (error) => {
@@ -368,7 +403,8 @@ function VideoEditorPage() {
   const canvasRef = useRef(null)
   const ffmpegRef = useRef(null)
   const previewVideoRef = useRef(null)
-  const sourceVideoUrlRef = useRef(null)
+  const sourceVideosRef = useRef([])
+  const playheadRef = useRef(0)
 
   const [clipItems, setClipItems] = useState([])
   const [layers, setLayers] = useState([])
@@ -376,12 +412,22 @@ function VideoEditorPage() {
   const [selectedObjectId, setSelectedObjectId] = useState(null)
   const [playhead, setPlayhead] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [sourceVideo, setSourceVideo] = useState(null)
-  const [sourceVideoUrl, setSourceVideoUrl] = useState('')
+  const [sourceVideos, setSourceVideos] = useState([])
   const [busyMessage, setBusyMessage] = useState('Idle')
   const [exportProfile, setExportProfile] = useState('balanced')
   const [exportProgress, setExportProgress] = useState(null)
   const [transitionPreset, setTransitionPreset] = useState('dipBlack')
+  const [clipResizeState, setClipResizeState] = useState(null)
+  const [timelineClipDragState, setTimelineClipDragState] = useState(null)
+  const [videoFramePreviews, setVideoFramePreviews] = useState({})
+
+  useEffect(() => {
+    sourceVideosRef.current = sourceVideos
+  }, [sourceVideos])
+
+  useEffect(() => {
+    playheadRef.current = playhead
+  }, [playhead])
 
   const selectedClip = useMemo(
     () => clipItems.find((clip) => clip.id === selectedClipId) ?? null,
@@ -393,10 +439,141 @@ function VideoEditorPage() {
     [layers, selectedObjectId],
   )
 
-  const sourceVideoClip = useMemo(
-    () => clipItems.find((clip) => clip.objectId === 'source-video' && clip.track === 'video') ?? null,
+  const sourceVideoClips = useMemo(
+    () => clipItems.filter((clip) => clip.track === 'video' && clip.sourceId),
     [clipItems],
   )
+
+  const extractVideoFrames = useCallback((videoUrl, frameCount = 16) => new Promise((resolve, reject) => {
+    const probeVideo = document.createElement('video')
+    const exportCanvas = document.createElement('canvas')
+    const context = exportCanvas.getContext('2d')
+
+    if (!context) {
+      reject(new Error('Failed to initialize frame extraction context.'))
+      return
+    }
+
+    const cleanup = () => {
+      probeVideo.src = ''
+      probeVideo.removeAttribute('src')
+    }
+
+    probeVideo.preload = 'metadata'
+    probeVideo.muted = true
+    probeVideo.playsInline = true
+    probeVideo.src = videoUrl
+
+    probeVideo.onloadedmetadata = async () => {
+      try {
+        const duration = Number.isFinite(probeVideo.duration) ? probeVideo.duration : 0
+        const width = Math.max(1, probeVideo.videoWidth || 160)
+        const height = Math.max(1, probeVideo.videoHeight || 90)
+
+        exportCanvas.width = width
+        exportCanvas.height = height
+
+        if (duration <= 0) {
+          cleanup()
+          resolve([])
+          return
+        }
+
+        const captureTimes = Array.from({ length: frameCount }, (_, index) => {
+          const position = (index + 0.5) / frameCount
+          return Math.max(0, Math.min(duration, duration * position))
+        })
+
+        const frames = []
+        for (const time of captureTimes) {
+          await new Promise((next, fail) => {
+            probeVideo.onseeked = () => next()
+            probeVideo.onerror = () => fail(new Error('Failed to seek video frame.'))
+            probeVideo.currentTime = time
+          })
+
+          context.drawImage(probeVideo, 0, 0, width, height)
+          frames.push(exportCanvas.toDataURL('image/jpeg', 0.72))
+        }
+
+        cleanup()
+        resolve(frames)
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
+    }
+
+    probeVideo.onerror = () => {
+      cleanup()
+      reject(new Error('Failed to decode source video frames.'))
+    }
+  }), [])
+
+  useEffect(() => {
+    const sourceIds = new Set(sourceVideos.map((item) => item.id))
+    setVideoFramePreviews((prev) => {
+      const next = Object.fromEntries(
+        Object.entries(prev).filter(([sourceId]) => sourceIds.has(sourceId)),
+      )
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next
+    })
+  }, [sourceVideos])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const missingSources = sourceVideos.filter((item) => !videoFramePreviews[item.id])
+    if (!missingSources.length) {
+      return undefined
+    }
+
+    const generate = async () => {
+      for (const source of missingSources) {
+        try {
+          const frames = await extractVideoFrames(source.url)
+          if (cancelled) {
+            return
+          }
+
+          setVideoFramePreviews((prev) => {
+            if (prev[source.id]) {
+              return prev
+            }
+            return {
+              ...prev,
+              [source.id]: frames,
+            }
+          })
+        } catch {
+          if (cancelled) {
+            return
+          }
+
+          setVideoFramePreviews((prev) => ({
+            ...prev,
+            [source.id]: [],
+          }))
+        }
+      }
+    }
+
+    void generate()
+
+    return () => {
+      cancelled = true
+    }
+  }, [sourceVideos, videoFramePreviews, extractVideoFrames])
+
+  const activeSourceVideoClip = useMemo(() => {
+    return sourceVideoClips
+      .filter((clip) => playhead >= clip.start && playhead <= clip.start + clip.duration)
+      .sort((left, right) => left.start - right.start)[0] ?? null
+  }, [playhead, sourceVideoClips])
+
+  const activeSourceVideo = useMemo(() => {
+    return sourceVideos.find((item) => item.id === activeSourceVideoClip?.sourceId) ?? null
+  }, [sourceVideos, activeSourceVideoClip])
 
   const transitionClips = useMemo(
     () => clipItems.filter((clip) => clip.type === 'transition'),
@@ -564,9 +741,9 @@ function VideoEditorPage() {
     syncLayersFromCanvas()
 
     return () => {
-      if (sourceVideoUrlRef.current) {
-        URL.revokeObjectURL(sourceVideoUrlRef.current)
-      }
+      sourceVideosRef.current.forEach((item) => {
+        URL.revokeObjectURL(item.url)
+      })
 
       canvas.dispose()
       canvasRef.current = null
@@ -605,92 +782,153 @@ function VideoEditorPage() {
     return () => cancelAnimationFrame(frame)
   }, [isPlaying, timelineDuration])
 
+  const syncPreviewVideoTime = useCallback((previewVideo, clip, time, threshold = 0.04) => {
+    if (!previewVideo || !clip) {
+      return
+    }
+
+    const clipOffset = clip.sourceOffset || 0
+    const clipDuration = clip.sourceDuration || clip.duration
+    const clipOut = clipOffset + clipDuration
+    const maxPlayable = Number.isFinite(previewVideo.duration)
+      ? Math.min(previewVideo.duration, clipOut)
+      : clipOut
+    const localTime = clipOffset + (time - clip.start)
+    const bounded = clamp(localTime, clipOffset, maxPlayable)
+
+    if (Math.abs(previewVideo.currentTime - bounded) > threshold) {
+      previewVideo.currentTime = bounded
+    }
+  }, [])
+
   useEffect(() => {
     const previewVideo = previewVideoRef.current
     if (!previewVideo) {
       return
     }
 
-    if (isPlaying) {
-      void previewVideo.play().catch(() => {
-        setBusyMessage('Video autoplay blocked. Press play again after interacting with the page.')
-      })
-      return
+    if (isPlaying && activeSourceVideo?.url) {
+      const startPlayback = () => {
+        if (activeSourceVideoClip) {
+          syncPreviewVideoTime(previewVideo, activeSourceVideoClip, playheadRef.current, 0)
+        }
+
+        void previewVideo.play().catch(() => {
+          setBusyMessage('Video autoplay blocked. Press play again after interacting with the page.')
+        })
+      }
+
+      if (previewVideo.readyState >= 1) {
+        startPlayback()
+        return
+      }
+
+      previewVideo.addEventListener('loadedmetadata', startPlayback, { once: true })
+      return () => {
+        previewVideo.removeEventListener('loadedmetadata', startPlayback)
+      }
     }
 
     previewVideo.pause()
-  }, [isPlaying])
+  }, [isPlaying, activeSourceVideo, activeSourceVideoClip, syncPreviewVideoTime])
 
   useEffect(() => {
     const previewVideo = previewVideoRef.current
-    if (!previewVideo || isPlaying) {
+    if (!previewVideo || !activeSourceVideoClip) {
       return
     }
 
-    const bounded = clamp(playhead, 0, Number.isFinite(previewVideo.duration) ? previewVideo.duration : playhead)
-    if (Math.abs(previewVideo.currentTime - bounded) > 0.04) {
-      previewVideo.currentTime = bounded
+    const alignToPlayhead = () => {
+      const threshold = isPlaying ? 0.12 : 0.04
+      syncPreviewVideoTime(previewVideo, activeSourceVideoClip, playhead, threshold)
     }
-  }, [playhead, isPlaying])
+
+    if (Number.isFinite(previewVideo.duration) && previewVideo.duration > 0) {
+      alignToPlayhead()
+      return
+    }
+
+    previewVideo.addEventListener('loadedmetadata', alignToPlayhead, { once: true })
+    return () => {
+      previewVideo.removeEventListener('loadedmetadata', alignToPlayhead)
+    }
+  }, [playhead, isPlaying, activeSourceVideoClip, syncPreviewVideoTime])
 
   const uploadSourceVideo = async (event) => {
-    const file = event.target.files?.[0] ?? null
-    if (!file) {
+    const files = Array.from(event.target.files ?? [])
+    if (!files.length) {
       return
     }
 
-    setBusyMessage('Preparing source video layer...')
+    setBusyMessage(`Preparing ${files.length} source video layer(s)...`)
     setIsPlaying(false)
-    setSourceVideo(file)
+    const loadedSources = []
 
-    const sourceUrl = URL.createObjectURL(file)
-    const probeVideo = document.createElement('video')
-    probeVideo.src = sourceUrl
-    probeVideo.playsInline = true
-    probeVideo.muted = true
-    probeVideo.preload = 'metadata'
-    probeVideo.load()
+    for (const file of files) {
+      const sourceUrl = URL.createObjectURL(file)
+      const probeVideo = document.createElement('video')
+      probeVideo.src = sourceUrl
+      probeVideo.playsInline = true
+      probeVideo.muted = true
+      probeVideo.preload = 'metadata'
+      probeVideo.load()
 
-    try {
-      await new Promise((resolve, reject) => {
-        probeVideo.onloadedmetadata = () => resolve()
-        probeVideo.onerror = () => reject(new Error('Failed loading uploaded video'))
-      })
+      try {
+        await new Promise((resolve, reject) => {
+          probeVideo.onloadedmetadata = () => resolve()
+          probeVideo.onerror = () => reject(new Error('Failed loading uploaded video'))
+        })
 
-      if (sourceVideoUrlRef.current) {
-        URL.revokeObjectURL(sourceVideoUrlRef.current)
+        loadedSources.push({
+          id: id('source'),
+          file,
+          url: sourceUrl,
+          duration: Number.isFinite(probeVideo.duration) ? Math.max(0.5, Number(probeVideo.duration.toFixed(2))) : 18,
+        })
+      } catch {
+        URL.revokeObjectURL(sourceUrl)
       }
-      sourceVideoUrlRef.current = sourceUrl
-      setSourceVideoUrl(sourceUrl)
+    }
 
-      const clipDuration = Number.isFinite(probeVideo.duration) ? Math.max(1, Math.floor(probeVideo.duration)) : 18
+    if (!loadedSources.length) {
+      setBusyMessage('Unable to load selected video files. Try MP4 (H.264) for browser compatibility.')
+      event.target.value = ''
+      return
+    }
 
-      setClipItems((prev) => {
-        const withoutSourceVideo = prev.filter((clip) => clip.objectId !== 'source-video' && clip.track !== 'video')
-        return [
-          {
-            id: id('clip'),
-            objectId: 'source-video',
-            label: file.name.replace(/\.[^/.]+$/, '') || 'Main footage',
-            track: 'video',
-            start: 0,
-            duration: clipDuration,
-            color: '#2f455c',
-            type: 'video',
-          },
-          ...withoutSourceVideo,
-        ]
+    setSourceVideos((prev) => [...prev, ...loadedSources])
+
+    setClipItems((prev) => {
+      const currentVideoTrackEnd = prev
+        .filter((clip) => clip.track === 'video')
+        .reduce((max, clip) => Math.max(max, clip.start + clip.duration), 0)
+
+      let nextStart = currentVideoTrackEnd
+      const newVideoClips = loadedSources.map((source) => {
+        const nextClip = {
+          id: id('clip'),
+          objectId: `source-video-${source.id}`,
+          sourceId: source.id,
+          label: source.file.name.replace(/\.[^/.]+$/, '') || 'Main footage',
+          track: 'video',
+          start: nextStart,
+          duration: source.duration,
+          sourceOffset: 0,
+          sourceDuration: source.duration,
+          color: '#2f455c',
+          type: 'video',
+        }
+        nextStart += source.duration
+        return nextClip
       })
 
-      setSelectedObjectId(null)
-      setPlayhead(0)
-      setBusyMessage(`Video layer added: ${file.name}`)
-    } catch {
-      URL.revokeObjectURL(sourceUrl)
-      setBusyMessage('Unable to load this video. Try MP4 (H.264) for browser compatibility.')
-    } finally {
-      event.target.value = ''
-    }
+      return [...prev, ...newVideoClips]
+    })
+
+    setSelectedObjectId(null)
+    setPlayhead(0)
+    setBusyMessage(`Added ${loadedSources.length} source video layer(s).`)
+    event.target.value = ''
   }
 
   const addTextLayer = () => {
@@ -729,6 +967,8 @@ function VideoEditorPage() {
         duration: 6,
         color: '#4f8b88',
         type: 'text',
+        transitionIn: 'fadeIn',
+        transitionInDuration: 0.5,
       },
     ])
     syncLayersFromCanvas()
@@ -771,6 +1011,8 @@ function VideoEditorPage() {
         duration: 6,
         color: '#d58b4b',
         type: 'overlay',
+        transitionIn: 'fadeIn',
+        transitionInDuration: 0.5,
       },
     ])
     syncLayersFromCanvas()
@@ -823,6 +1065,8 @@ function VideoEditorPage() {
           duration: 8,
           color: '#c9693e',
           type: 'image',
+          transitionIn: 'fadeIn',
+          transitionInDuration: 0.5,
         },
       ])
       syncLayersFromCanvas()
@@ -862,6 +1106,238 @@ function VideoEditorPage() {
     setPlayhead(clamp(cursorX / PIXELS_PER_SECOND, 0, timelineDuration))
   }
 
+  const autoScrollTimelineAtClientX = useCallback((clientX) => {
+    const timeline = timelineRef.current
+    if (!timeline) {
+      return
+    }
+
+    const bounds = timeline.getBoundingClientRect()
+    const edgeZone = 44
+    const step = 18
+
+    if (clientX < bounds.left + edgeZone) {
+      timeline.scrollLeft = Math.max(0, timeline.scrollLeft - step)
+      return
+    }
+
+    if (clientX > bounds.right - edgeZone) {
+      timeline.scrollLeft = Math.min(timeline.scrollWidth - timeline.clientWidth, timeline.scrollLeft + step)
+    }
+  }, [])
+
+  const getTrackSnapCandidates = useCallback((trackId, clipId) => {
+    const points = [0, timelineDuration]
+
+    clipItems.forEach((clip) => {
+      if (clip.id === clipId || clip.track !== trackId) {
+        return
+      }
+      points.push(clip.start)
+      points.push(clip.start + clip.duration)
+    })
+
+    return points
+  }, [clipItems, timelineDuration])
+
+  const startClipResize = useCallback((event, clip, edge) => {
+    if (!RESIZABLE_CLIP_TRACKS.includes(clip.track)) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+
+    setSelectedClipId(clip.id)
+    setClipResizeState({
+      clipId: clip.id,
+      track: clip.track,
+      edge,
+      initialClientX: event.clientX,
+      initialScrollLeft: timelineRef.current?.scrollLeft ?? 0,
+      initialStart: clip.start,
+      initialDuration: clip.duration,
+      initialSourceOffset: clip.sourceOffset || 0,
+      initialSourceDuration: clip.sourceDuration || clip.duration,
+      maxSourceDuration: sourceVideosRef.current.find((item) => item.id === clip.sourceId)?.duration
+        || clip.sourceDuration
+        || clip.duration,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!clipResizeState) {
+      return undefined
+    }
+
+    const onPointerMove = (event) => {
+      autoScrollTimelineAtClientX(event.clientX)
+
+      const currentScrollLeft = timelineRef.current?.scrollLeft ?? clipResizeState.initialScrollLeft
+      const deltaSeconds = (
+        (event.clientX - clipResizeState.initialClientX)
+        + (currentScrollLeft - clipResizeState.initialScrollLeft)
+      ) / PIXELS_PER_SECOND
+      const snapCandidates = getTrackSnapCandidates(clipResizeState.track, clipResizeState.clipId)
+
+      setClipItems((prev) => prev.map((clip) => {
+        if (clip.id !== clipResizeState.clipId) {
+          return clip
+        }
+
+        if (clip.track === 'video') {
+          const maxSourceDuration = clipResizeState.maxSourceDuration || clipResizeState.initialSourceDuration
+          const minDuration = 0.5
+
+          if (clipResizeState.edge === 'right') {
+            const maxTimelineDuration = Math.max(minDuration, timelineDuration - clipResizeState.initialStart)
+            const maxDurationFromSource = Math.max(
+              minDuration,
+              maxSourceDuration - clipResizeState.initialSourceOffset,
+            )
+            const nextDuration = clamp(
+              clipResizeState.initialDuration + deltaSeconds,
+              minDuration,
+              Math.min(maxTimelineDuration, maxDurationFromSource),
+            )
+            const snappedEnd = snapToCandidates(
+              clipResizeState.initialStart + nextDuration,
+              snapCandidates,
+            )
+            const snappedDuration = clamp(
+              snappedEnd - clipResizeState.initialStart,
+              minDuration,
+              Math.min(maxTimelineDuration, maxDurationFromSource),
+            )
+
+            return {
+              ...clip,
+              duration: snappedDuration,
+              sourceDuration: snappedDuration,
+            }
+          }
+
+          const minStart = Math.max(0, clipResizeState.initialStart - clipResizeState.initialSourceOffset)
+          const maxStart = clipResizeState.initialStart + clipResizeState.initialDuration - minDuration
+          const rawStart = clamp(clipResizeState.initialStart + deltaSeconds, minStart, maxStart)
+          const nextStart = clamp(snapToCandidates(rawStart, snapCandidates), minStart, maxStart)
+          const startDelta = nextStart - clipResizeState.initialStart
+          const nextDuration = clipResizeState.initialDuration - startDelta
+          const nextSourceOffset = clamp(
+            clipResizeState.initialSourceOffset + startDelta,
+            0,
+            Math.max(0, maxSourceDuration - minDuration),
+          )
+
+          return {
+            ...clip,
+            start: nextStart,
+            duration: nextDuration,
+            sourceOffset: nextSourceOffset,
+            sourceDuration: nextDuration,
+          }
+        }
+
+        if (clipResizeState.edge === 'right') {
+          const maxDuration = Math.max(0.5, timelineDuration - clipResizeState.initialStart)
+          const snappedEnd = snapToCandidates(
+            clipResizeState.initialStart + clamp(clipResizeState.initialDuration + deltaSeconds, 0.5, maxDuration),
+            snapCandidates,
+          )
+          return {
+            ...clip,
+            duration: clamp(snappedEnd - clipResizeState.initialStart, 0.5, maxDuration),
+          }
+        }
+
+        const clipEnd = clipResizeState.initialStart + clipResizeState.initialDuration
+        const nextStart = clamp(snapToCandidates(
+          clamp(clipResizeState.initialStart + deltaSeconds, 0, clipEnd - 0.5),
+          snapCandidates,
+        ), 0, clipEnd - 0.5)
+        return {
+          ...clip,
+          start: nextStart,
+          duration: clipEnd - nextStart,
+        }
+      }))
+    }
+
+    const onPointerUp = () => {
+      setClipResizeState(null)
+      setBusyMessage('Clip duration updated.')
+    }
+
+    window.addEventListener('mousemove', onPointerMove)
+    window.addEventListener('mouseup', onPointerUp)
+
+    return () => {
+      window.removeEventListener('mousemove', onPointerMove)
+      window.removeEventListener('mouseup', onPointerUp)
+    }
+  }, [clipResizeState, timelineDuration, autoScrollTimelineAtClientX, getTrackSnapCandidates])
+
+  useEffect(() => {
+    if (!timelineClipDragState) {
+      return undefined
+    }
+
+    const onPointerMove = (event) => {
+      autoScrollTimelineAtClientX(event.clientX)
+
+      const currentScrollLeft = timelineRef.current?.scrollLeft ?? timelineClipDragState.initialScrollLeft
+      const deltaSeconds = (
+        (event.clientX - timelineClipDragState.initialClientX)
+        + (currentScrollLeft - timelineClipDragState.initialScrollLeft)
+      ) / PIXELS_PER_SECOND
+      const hasMoved = Math.abs(deltaSeconds) > 0.01
+
+      if (hasMoved && !timelineClipDragState.hasMoved) {
+        setTimelineClipDragState((current) => (current ? { ...current, hasMoved: true } : current))
+      }
+
+      const snapCandidates = getTrackSnapCandidates(
+        timelineClipDragState.track,
+        timelineClipDragState.clipId,
+      )
+
+      setClipItems((prev) => prev.map((clip) => {
+        if (clip.id !== timelineClipDragState.clipId) {
+          return clip
+        }
+
+        const rawStart = clamp(
+          timelineClipDragState.initialStart + deltaSeconds,
+          0,
+          Math.max(0, timelineDuration - clip.duration),
+        )
+
+        const snappedStart = snapToCandidates(rawStart, snapCandidates)
+
+        return {
+          ...clip,
+          start: clamp(snappedStart, 0, Math.max(0, timelineDuration - clip.duration)),
+        }
+      }))
+    }
+
+    const onPointerUp = () => {
+      const moved = timelineClipDragState.hasMoved
+      setTimelineClipDragState(null)
+      if (moved) {
+        setBusyMessage('Clip position updated.')
+      }
+    }
+
+    window.addEventListener('mousemove', onPointerMove)
+    window.addEventListener('mouseup', onPointerUp)
+
+    return () => {
+      window.removeEventListener('mousemove', onPointerMove)
+      window.removeEventListener('mouseup', onPointerUp)
+    }
+  }, [timelineClipDragState, timelineDuration, autoScrollTimelineAtClientX, getTrackSnapCandidates])
+
   const updateClip = (changes) => {
     if (!selectedClip) {
       return
@@ -874,6 +1350,21 @@ function VideoEditorPage() {
         }
 
         const next = { ...clip, ...changes }
+
+        if (clip.track === 'video') {
+          const source = sourceVideosRef.current.find((item) => item.id === clip.sourceId)
+          const maxSourceDuration = source?.duration || clip.sourceDuration || clip.duration
+          const nextOffset = clamp(
+            Number.isFinite(next.sourceOffset) ? next.sourceOffset : (clip.sourceOffset || 0),
+            0,
+            Math.max(0, maxSourceDuration - 0.5),
+          )
+
+          next.sourceOffset = nextOffset
+          next.duration = Math.min(next.duration, maxSourceDuration - nextOffset)
+          next.sourceDuration = next.duration
+        }
+
         next.start = clamp(next.start, 0, timelineDuration)
         next.duration = clamp(next.duration, 0.5, timelineDuration)
         return next
@@ -901,6 +1392,22 @@ function VideoEditorPage() {
   const removeSelectedClip = () => {
     if (!selectedClip) {
       return
+    }
+
+    if (selectedClip.track === 'video' && selectedClip.sourceId) {
+      const stillReferenced = clipItems.some(
+        (clip) => clip.id !== selectedClip.id && clip.sourceId === selectedClip.sourceId,
+      )
+
+      if (!stillReferenced) {
+        setSourceVideos((prev) => {
+          const target = prev.find((item) => item.id === selectedClip.sourceId)
+          if (target) {
+            URL.revokeObjectURL(target.url)
+          }
+          return prev.filter((item) => item.id !== selectedClip.sourceId)
+        })
+      }
     }
 
     setClipItems((prev) => prev.filter((clip) => clip.id !== selectedClip.id))
@@ -946,8 +1453,8 @@ function VideoEditorPage() {
   }
 
   const exportWithFfmpeg = async () => {
-    if (!sourceVideo) {
-      setBusyMessage('Upload a source video first to export.')
+    if (!sourceVideoClips.length || !sourceVideos.length) {
+      setBusyMessage('Upload at least one source video first to export.')
       return
     }
 
@@ -959,28 +1466,31 @@ function VideoEditorPage() {
       return
     }
 
-    const sourceDuration = previewVideoRef.current?.duration
+    const orderedVideoClips = [...sourceVideoClips].sort((left, right) => left.start - right.start)
+    const baseTimelineStart = orderedVideoClips[0]?.start ?? 0
+    const baseTimelineEnd = orderedVideoClips.reduce((max, clip) => Math.max(max, clip.start + clip.duration), 0)
+    const baseTimelineDuration = Math.max(0.5, baseTimelineEnd - baseTimelineStart)
     const hasVisualEdits = stageCanvas
       .getObjects()
       .some((object) => object.data?.kind !== 'stage')
     const hasTransitions = transitionClips.length > 0
-    const sourceExtension = sourceVideo.name.split('.').pop()?.toLowerCase() || ''
-    const isSourceMp4 = sourceVideo.type === 'video/mp4' || sourceExtension === 'mp4'
-    const trimStart = clamp(sourceVideoClip?.start ?? 0, 0, timelineDuration)
-    const trimDuration = clamp(
-      sourceVideoClip?.duration ?? timelineDuration,
-      0.5,
-      Number.isFinite(sourceDuration)
-        ? Math.max(0.5, sourceDuration - trimStart)
-        : Math.max(0.5, timelineDuration - trimStart),
-    )
+    const earliestClip = orderedVideoClips[0]
+    const earliestSource = sourceVideos.find((item) => item.id === earliestClip?.sourceId) ?? null
+    const sourceExtension = earliestSource?.file.name.split('.').pop()?.toLowerCase() || ''
+    const isSourceMp4 = earliestSource?.file.type === 'video/mp4' || sourceExtension === 'mp4'
+    const sourceInputOffset = orderedVideoClips.length === 1
+      ? (orderedVideoClips[0]?.sourceOffset || 0)
+      : 0
+    const trimStart = 0
+    const trimDuration = baseTimelineDuration
     const isFullLengthExport =
-      Number.isFinite(sourceDuration)
-      && trimStart <= 0.05
-      && Math.abs(trimDuration - sourceDuration) <= 0.35
+      orderedVideoClips.length === 1
+      && Number.isFinite(earliestSource?.duration)
+      && baseTimelineStart <= 0.05
+      && Math.abs(trimDuration - earliestSource.duration) <= 0.35
 
-    if (!hasVisualEdits && !hasTransitions && isSourceMp4 && isFullLengthExport) {
-      const sourceUrl = URL.createObjectURL(sourceVideo)
+    if (!hasVisualEdits && !hasTransitions && isSourceMp4 && isFullLengthExport && earliestSource) {
+      const sourceUrl = URL.createObjectURL(earliestSource.file)
       const anchor = document.createElement('a')
       anchor.href = sourceUrl
       anchor.download = 'canva-like-export.mp4'
@@ -998,9 +1508,7 @@ function VideoEditorPage() {
       setBusyMessage('Loading FFmpeg core (first time can take a while)...')
       updateExportProgress('Loading encoder', 5)
       const ffmpeg = await getFfmpeg()
-      const extension = sourceVideo.name.split('.').pop()?.toLowerCase() || 'mp4'
-      const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
-      const inputName = `input-${Date.now()}.${safeExtension}`
+      const inputName = `input-${Date.now()}.mp4`
       const outputName = `export-${Date.now()}.mp4`
       const tempFrameNames = []
       const renderedOverlayCache = new Map()
@@ -1020,13 +1528,104 @@ function VideoEditorPage() {
 
       setBusyMessage('Writing source media into FFmpeg virtual FS...')
       updateExportProgress('Preparing media', 10)
-      await ffmpeg.writeFile(inputName, await fetchFile(sourceVideo))
+
+      if (orderedVideoClips.length === 1) {
+        const source = sourceVideos.find((item) => item.id === orderedVideoClips[0].sourceId)
+        if (!source) {
+          throw new Error('Missing source media for video clip.')
+        }
+        await ffmpeg.writeFile(inputName, await fetchFile(source.file))
+      } else {
+        const segmentInputs = []
+        const concatParts = []
+
+        let timelineCursor = baseTimelineStart
+        for (const clip of orderedVideoClips) {
+          const clipStart = Math.max(baseTimelineStart, clip.start)
+          const gapDuration = clipStart - timelineCursor
+
+          if (gapDuration > 0.02) {
+            concatParts.push({ type: 'gap', duration: gapDuration })
+          }
+
+          concatParts.push({ type: 'clip', clip })
+          timelineCursor = Math.max(timelineCursor, clip.start + clip.duration)
+        }
+
+        const stitchedArgs = []
+        concatParts.forEach((part, partIndex) => {
+          if (part.type === 'gap') {
+            stitchedArgs.push(
+              '-f',
+              'lavfi',
+              '-t',
+              String(part.duration),
+              '-i',
+              `color=c=black:s=${outputWidth}x${outputHeight}:r=${frameRate}`,
+            )
+            return
+          }
+
+          const source = sourceVideos.find((item) => item.id === part.clip.sourceId)
+          if (!source) {
+            return
+          }
+
+          const extension = source.file.name.split('.').pop()?.toLowerCase() || 'mp4'
+          const safeExtension = /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'mp4'
+          const clipInputName = `source-${String(partIndex).padStart(3, '0')}.${safeExtension}`
+          segmentInputs.push({ name: clipInputName, sourceFile: source.file })
+          stitchedArgs.push(
+            '-ss',
+            String(part.clip.sourceOffset || 0),
+            '-t',
+            String(part.clip.sourceDuration || part.clip.duration),
+            '-i',
+            clipInputName,
+          )
+        })
+
+        await Promise.all(
+          segmentInputs.map(async (segment) => {
+            await ffmpeg.writeFile(segment.name, await fetchFile(segment.sourceFile))
+          }),
+        )
+
+        const filterParts = []
+        const concatInputs = []
+        concatParts.forEach((part, index) => {
+          filterParts.push(`[${index}:v]scale=${outputWidth}:${outputHeight},fps=${frameRate},format=yuv420p,setsar=1[v${index}]`)
+          concatInputs.push(`[v${index}]`)
+        })
+        filterParts.push(`${concatInputs.join('')}concat=n=${concatParts.length}:v=1:a=0[vout]`)
+
+        await ffmpeg.exec([
+          ...stitchedArgs,
+          '-filter_complex',
+          filterParts.join(';'),
+          '-map',
+          '[vout]',
+          '-c:v',
+          'libx264',
+          '-preset',
+          'veryfast',
+          '-crf',
+          '24',
+          '-pix_fmt',
+          'yuv420p',
+          inputName,
+        ])
+
+        await Promise.allSettled(segmentInputs.map((segment) => ffmpeg.deleteFile(segment.name)))
+      }
 
       const overlaySegments = []
       const normalizedTransitionClips = transitionClips
         .map((clip) => {
-          const boundedStart = clamp(clip.start, trimStart, trimStart + trimDuration)
-          const boundedEnd = clamp(clip.start + clip.duration, trimStart, trimStart + trimDuration)
+          const relativeStart = clip.start - baseTimelineStart
+          const relativeEnd = (clip.start + clip.duration) - baseTimelineStart
+          const boundedStart = clamp(relativeStart, trimStart, trimStart + trimDuration)
+          const boundedEnd = clamp(relativeEnd, trimStart, trimStart + trimDuration)
           const duration = boundedEnd - boundedStart
 
           if (duration <= 0.001) {
@@ -1035,9 +1634,9 @@ function VideoEditorPage() {
 
           return {
             ...clip,
-            start: boundedStart - trimStart,
+            start: boundedStart,
             duration,
-            end: boundedEnd - trimStart,
+            end: boundedEnd,
           }
         })
         .filter(Boolean)
@@ -1050,12 +1649,12 @@ function VideoEditorPage() {
         const changePoints = new Set([trimStart, trimEnd])
 
         clipItems.forEach((clip) => {
-          if (clip.objectId === 'source-video') {
+          if (clip.track === 'video') {
             return
           }
 
-          const clipStart = clamp(clip.start, trimStart, trimEnd)
-          const clipEnd = clamp(clip.start + clip.duration, trimStart, trimEnd)
+          const clipStart = clamp(clip.start - baseTimelineStart, trimStart, trimEnd)
+          const clipEnd = clamp((clip.start + clip.duration) - baseTimelineStart, trimStart, trimEnd)
           changePoints.add(clipStart)
           changePoints.add(clipEnd)
         })
@@ -1071,7 +1670,7 @@ function VideoEditorPage() {
             continue
           }
 
-          const timelineTime = segmentStart + (segmentDuration / 2)
+          const timelineTime = baseTimelineStart + segmentStart + (segmentDuration / 2)
           applyPlaybackVisibility(timelineTime)
           stageCanvas.renderAll()
 
@@ -1101,11 +1700,23 @@ function VideoEditorPage() {
             renderedOverlayCache.set(overlaySignature, frameName)
           }
 
+          const segmentClips = clipItems.filter((clip) => {
+            const clipStart = clip.start - baseTimelineStart
+            const clipEnd = clipStart + clip.duration
+            return (
+              clip.track !== 'video'
+              && clip.track !== 'transition'
+              && clipStart < segmentEnd
+              && clipEnd > segmentStart
+            )
+          })
+
           overlaySegments.push({
             name: frameName,
-            start: segmentStart - trimStart,
-            end: segmentEnd - trimStart,
+            start: segmentStart,
+            end: segmentEnd,
             duration: segmentDuration,
+            clips: segmentClips,
           })
 
           const segmentProgress = ((segmentIndex + 1) / Math.max(1, sortedPoints.length - 1)) * 30
@@ -1127,6 +1738,7 @@ function VideoEditorPage() {
         ) {
           previousSegment.end = segment.end
           previousSegment.duration = previousSegment.end - previousSegment.start
+          previousSegment.clips = segment.clips
           return segments
         }
 
@@ -1153,17 +1765,57 @@ function VideoEditorPage() {
             const inputIndex = index + 1
             const outputStream = `v${index + 1}`
             const safeEnd = Math.max(segment.start, segment.end - 0.001)
+            const transitionSourceClip = (segment.clips || []).find(
+              (clip) => (clip.transitionIn || 'none') !== 'none',
+            )
 
+            let filterStr = `[${inputIndex}:v]format=rgba`
+            let overlayX = '0'
+            let overlayY = '0'
+
+            if (transitionSourceClip) {
+              const transitionType = transitionSourceClip.transitionIn || 'none'
+              const transitionDuration = clamp(
+                Number(transitionSourceClip.transitionInDuration) || 0.5,
+                0.1,
+                2,
+              )
+              const transitionStart = clamp(
+                transitionSourceClip.start - baseTimelineStart,
+                segment.start,
+                safeEnd,
+              )
+              const transitionEnd = transitionStart + transitionDuration
+              const shouldAnimateInSegment = transitionStart >= segment.start && transitionStart <= safeEnd
+
+              if (shouldAnimateInSegment) {
+                filterStr += `,fade=t=in:st=${transitionStart.toFixed(3)}:d=${transitionDuration.toFixed(3)}:alpha=1`
+
+                if (transitionType === 'slideInLeft') {
+                  overlayX = `'if(lt(t,${transitionStart.toFixed(3)}),-W,if(lt(t,${transitionEnd.toFixed(3)}),-W+(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)}*W,0))'`
+                } else if (transitionType === 'slideInRight') {
+                  overlayX = `'if(lt(t,${transitionStart.toFixed(3)}),W,if(lt(t,${transitionEnd.toFixed(3)}),W-(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)}*W,0))'`
+                } else if (transitionType === 'slideInUp') {
+                  overlayY = `'if(lt(t,${transitionStart.toFixed(3)}),H,if(lt(t,${transitionEnd.toFixed(3)}),H-(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)}*H,0))'`
+                } else if (transitionType === 'slideInDown') {
+                  overlayY = `'if(lt(t,${transitionStart.toFixed(3)}),-H,if(lt(t,${transitionEnd.toFixed(3)}),-H+(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)}*H,0))'`
+                } else if (transitionType === 'zoomIn') {
+                  filterStr += `,scale=w='iw*(0.6+0.4*if(lt(t,${transitionStart.toFixed(3)}),0,if(lt(t,${transitionEnd.toFixed(3)}),(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)},1)))':h='ih*(0.6+0.4*if(lt(t,${transitionStart.toFixed(3)}),0,if(lt(t,${transitionEnd.toFixed(3)}),(t-${transitionStart.toFixed(3)})/${transitionDuration.toFixed(3)},1)))',pad=${outputWidth}:${outputHeight}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`
+                }
+              }
+            }
+
+            filterStr += `[ov${index}]`
             filterParts.push(
-              `[${inputIndex}:v]format=rgba[ov${index}]`,
-              `[${previousStream}][ov${index}]overlay=0:0:format=auto:enable='between(t,${segment.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
+              filterStr,
+              `[${previousStream}][ov${index}]overlay=x=${overlayX}:y=${overlayY}:format=auto:enable='between(t,${segment.start.toFixed(3)},${safeEnd.toFixed(3)})'[${outputStream}]`,
             )
             previousStream = outputStream
           })
 
           const ffmpegArgs = [
             '-ss',
-            String(trimStart),
+            String(sourceInputOffset + trimStart),
             '-t',
             String(trimDuration),
             '-i',
@@ -1175,7 +1827,7 @@ function VideoEditorPage() {
               '-loop',
               '1',
               '-t',
-              String(segment.duration),
+              String(trimDuration),
               '-i',
               segment.name,
             )
@@ -1297,7 +1949,7 @@ function VideoEditorPage() {
           try {
             await ffmpeg.exec([
               '-ss',
-              String(trimStart),
+              String(sourceInputOffset + trimStart),
               '-t',
               String(trimDuration),
               '-i',
@@ -1317,7 +1969,7 @@ function VideoEditorPage() {
             setBusyMessage('Fast copy failed. Falling back to ultrafast encode...')
             await ffmpeg.exec([
               '-ss',
-              String(trimStart),
+              String(sourceInputOffset + trimStart),
               '-t',
               String(trimDuration),
               '-i',
@@ -1386,11 +2038,12 @@ function VideoEditorPage() {
      
         <div className="ve-topbar-actions">
           <Link to="/" className="ve-link ve-link-muted">Home</Link>
-          <label className="ve-link ve-link-muted" htmlFor="video-source-input">Upload Source Video</label>
+          <label className="ve-link ve-link-muted" htmlFor="video-source-input">Upload Source Video(s)</label>
           <input
             id="video-source-input"
             type="file"
             accept="video/*"
+            multiple
             className="ve-hidden-input"
             onChange={uploadSourceVideo}
           />
@@ -1496,8 +2149,8 @@ function VideoEditorPage() {
           <div className="ve-stage-wrap">
             <video
               ref={previewVideoRef}
-              className={`ve-preview-video ${sourceVideoUrl ? 'is-visible' : ''}`}
-              src={sourceVideoUrl || undefined}
+              className={`ve-preview-video ${activeSourceVideo?.url ? 'is-visible' : ''}`}
+              src={activeSourceVideo?.url || undefined}
               playsInline
               muted
               preload="auto"
@@ -1611,6 +2264,37 @@ function VideoEditorPage() {
                 />
               </label>
 
+              {(selectedClip.type === 'image' || selectedClip.type === 'text' || selectedClip.type === 'overlay') ? (
+                <>
+                  <label>
+                    Transition In
+                    <select
+                      value={selectedClip.transitionIn || 'fadeIn'}
+                      onChange={(event) => updateClip({ transitionIn: event.target.value })}
+                    >
+                      <option value="none">None</option>
+                      <option value="fadeIn">Fade In</option>
+                      <option value="slideInLeft">Slide In Left</option>
+                      <option value="slideInRight">Slide In Right</option>
+                      <option value="slideInUp">Slide In Up</option>
+                      <option value="slideInDown">Slide In Down</option>
+                      <option value="zoomIn">Zoom In</option>
+                    </select>
+                  </label>
+                  <label>
+                    Transition Duration (s)
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={2}
+                      step={0.1}
+                      value={selectedClip.transitionInDuration || 0.5}
+                      onChange={(event) => updateClip({ transitionInDuration: Number(event.target.value) })}
+                    />
+                  </label>
+                </>
+              ) : null}
+
               {selectedClip.type === 'transition' ? (
                 <label>
                   Transition
@@ -1665,18 +2349,50 @@ function VideoEditorPage() {
           {TRACKS.map((track) => (
             <div className="ve-track" key={track.id}>
               <div className="ve-track-label">{track.label}</div>
-              <div className="ve-track-lane" style={{ width: `${timelineWidth}px` }}>
+              <div
+                className="ve-track-lane"
+                style={{ width: `${timelineWidth}px` }}
+              >
                 {clipItems
                   .filter((clip) => clip.track === track.id)
                   .map((clip) => (
                     <button
                       type="button"
-                      className={`ve-clip ${selectedClipId === clip.id ? 'is-active' : ''}`}
+                      className={`ve-clip ${selectedClipId === clip.id ? 'is-active' : ''} ${clip.track === 'video' ? 'is-video' : ''} ${RESIZABLE_CLIP_TRACKS.includes(clip.track) ? 'is-resizable' : ''} ${clipResizeState?.clipId === clip.id ? 'is-resizing' : ''} ${timelineClipDragState?.clipId === clip.id ? 'is-dragging' : ''}`}
                       key={clip.id}
                       style={{
                         left: `${clip.start * PIXELS_PER_SECOND}px`,
                         width: `${Math.max(44, clip.duration * PIXELS_PER_SECOND)}px`,
                         background: clip.color,
+                        position: 'relative',
+                      }}
+                      onMouseDown={(event) => {
+                        if (event.button !== 0) {
+                          return
+                        }
+
+                        const targetElement = event.target
+                        if (!(targetElement instanceof HTMLElement)) {
+                          return
+                        }
+
+                        if (
+                          targetElement.closest('.ve-clip-handle')
+                          || targetElement.closest('.ve-clip-reset-btn')
+                        ) {
+                          return
+                        }
+
+                        event.preventDefault()
+
+                        setTimelineClipDragState({
+                          clipId: clip.id,
+                          track: clip.track,
+                          initialClientX: event.clientX,
+                          initialScrollLeft: timelineRef.current?.scrollLeft ?? 0,
+                          initialStart: clip.start,
+                          hasMoved: false,
+                        })
                       }}
                       onClick={(event) => {
                         event.stopPropagation()
@@ -1698,7 +2414,89 @@ function VideoEditorPage() {
                         }
                       }}
                     >
-                      {clip.label}
+                      {clip.track === 'video' && (clipResizeState?.clipId === clip.id || timelineClipDragState?.clipId === clip.id) ? (
+                        <span className="ve-clip-time-hint">
+                          {`Start ${formatPreciseTime(clip.start)}s | End ${formatPreciseTime(clip.start + clip.duration)}s | In ${formatPreciseTime(clip.sourceOffset || 0)}s | Out ${formatPreciseTime((clip.sourceOffset || 0) + (clip.sourceDuration || clip.duration))}s`}
+                        </span>
+                      ) : null}
+
+                      {clip.track === 'video' && ((clip.sourceOffset || 0) > 0 || Math.abs((clip.sourceDuration || clip.duration) - (sourceVideos.find((item) => item.id === clip.sourceId)?.duration || clip.duration)) > 0.02) && (
+                        <button
+                          type="button"
+                          className="ve-clip-reset-btn"
+                          style={{
+                            position: 'absolute',
+                            top: 2,
+                            right: 2,
+                            zIndex: 2,
+                            fontSize: 10,
+                            padding: '2px 6px',
+                            background: '#fff',
+                            border: '1px solid #ccc',
+                            borderRadius: 3,
+                            cursor: 'pointer',
+                          }}
+                          title="Reset to original duration"
+                          onClick={e => {
+                            e.stopPropagation()
+                            setClipItems((prev) => prev.map((c) => {
+                              if (c.id !== clip.id) {
+                                return c
+                              }
+
+                              const originalDuration = sourceVideos.find((item) => item.id === c.sourceId)?.duration || c.duration
+                              return {
+                                ...c,
+                                sourceOffset: 0,
+                                sourceDuration: originalDuration,
+                                duration: originalDuration,
+                              }
+                            }))
+                          }}
+                        >
+                          Reset
+                        </button>
+                      )}
+                      {clip.track === 'video' && videoFramePreviews[clip.sourceId]?.length ? (
+                        <span className="ve-clip-frame-strip" aria-hidden="true">
+                          {(() => {
+                            const source = sourceVideos.find((item) => item.id === clip.sourceId)
+                            const sourceDuration = source?.duration || clip.duration
+                            const sourceFrames = videoFramePreviews[clip.sourceId]
+                            const startOffset = clip.sourceOffset || 0
+                            const visibleDuration = clip.sourceDuration || clip.duration
+                            const slotCount = Math.max(6, Math.min(30, Math.round((clip.duration * PIXELS_PER_SECOND) / 24)))
+
+                            return Array.from({ length: slotCount }, (_, frameIndex) => {
+                              const sampleTime = startOffset + ((frameIndex + 0.5) / slotCount) * visibleDuration
+                              const ratio = sourceDuration > 0 ? sampleTime / sourceDuration : 0
+                              const sourceIndex = clamp(
+                                Math.round(ratio * (sourceFrames.length - 1)),
+                                0,
+                                sourceFrames.length - 1,
+                              )
+                              const frameSrc = sourceFrames[sourceIndex]
+
+                              return <img key={`${clip.id}-frame-${frameIndex}`} src={frameSrc} alt="" />
+                            })
+                          })()}
+                        </span>
+                      ) : null}
+                      {RESIZABLE_CLIP_TRACKS.includes(clip.track) ? (
+                        <span
+                          className="ve-clip-handle ve-clip-handle-left"
+                          onMouseDown={(event) => startClipResize(event, clip, 'left')}
+                        />
+                      ) : null}
+                      {clip.track !== 'video' ? (
+                        <span className="ve-clip-label">{clip.label}</span>
+                      ) : null}
+                      {RESIZABLE_CLIP_TRACKS.includes(clip.track) ? (
+                        <span
+                          className="ve-clip-handle ve-clip-handle-right"
+                          onMouseDown={(event) => startClipResize(event, clip, 'right')}
+                        />
+                      ) : null}
                     </button>
                   ))}
               </div>
